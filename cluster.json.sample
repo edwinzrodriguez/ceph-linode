@@ -1,7 +1,10 @@
 {
-  "region": "us-west",
-  "image": "linode/centos-stream8",
-  "type": 8192,
+  "region": "us-east-2",
+  "image": "ibm-centos-stream-9-amd64-13",
+  "type": "bx3d-8x40",
+  "resource_group_name": "your-resource-group-name",
+  "vpc": "your-vpc-name-or-id",
+  "ssh_key": "your-ssh-key-name-or-id",
   "nodes": [
       {
         "count": 3,

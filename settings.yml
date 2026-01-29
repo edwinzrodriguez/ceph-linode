@@ -1,4 +1,4 @@
-# Copyright (C) 2021 Red Hat, Inc.
+# Copyright (C) 2026 IBM, Inc.
 #
 # This program is free software: you can redistribute it and/or modify it under
 # the terms of the GNU General Public License as published by the Free Software
@@ -17,7 +17,7 @@
   tasks:
   - set_fact:
      # RELEASE must be a tagged version or release branch to pull cephadm from, probably just use the latest release, not main!
-     RELEASE: reef
+     RELEASE: tentacle
      # CEPHADM_REPO is the branch to actually deploy
      # It can be a dev branch, e.g. CEPHADM_REPO: --dev wip-batrick-testing-20230808.012511
-     CEPHADM_REPO: --release reef
+     CEPHADM_REPO: --release tentacle
