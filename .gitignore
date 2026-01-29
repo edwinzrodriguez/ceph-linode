@@ -1,5 +1,9 @@
 ansible_inventory
 ansible.cfg
 linodes
+ibmnodes
 LINODE_GROUP
 cluster.json
+ibm-credentials.env
+apikey.json
+**/.idea/
