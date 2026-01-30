@@ -31,17 +31,19 @@ from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_platform_services import GlobalTaggingV1, ResourceManagerV2
 from ibm_vpc import VpcV1
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
 
 # Marker exception for transient "try again" failures handled by busy_retry.
 class EAgain(RuntimeError):
     def __str__(self):
         return "EAgain"
 
+
 def busy_retry(exceptions=[], tries=20, delay=30):
     def wrapper(f):
         def wrapped(*args, **kwargs):
-            for i in range(tries-1):
+            for i in range(tries - 1):
                 try:
                     return f(*args, **kwargs)
                 except ApiException as e:
@@ -55,8 +57,11 @@ def busy_retry(exceptions=[], tries=20, delay=30):
                     logging.warning(f"retrying due to expected exception: {e}")
                     time.sleep(delay)
             return f(*args, **kwargs)
+
         return wrapped
+
     return wrapper
+
 
 @contextmanager
 def releasing(semaphore):
@@ -66,7 +71,8 @@ def releasing(semaphore):
     finally:
         semaphore.release()
 
-class CephIbmCloud():
+
+class CephIbmCloud:
     user_agent = "https://github.com/batrick/ceph-linode/"
 
     def __init__(self):
@@ -92,7 +98,9 @@ class CephIbmCloud():
         if self._credentials is not None:
             return self._credentials
 
-        path = self._credentials_file or os.getenv("IBM_CLOUD_CREDENTIALS_FILE", "ibm-credentials.env")
+        path = self._credentials_file or os.getenv(
+            "IBM_CLOUD_CREDENTIALS_FILE", "ibm-credentials.env"
+        )
         if not os.path.exists(path):
             raise RuntimeError(f"IBM Cloud credentials file not found: {path}")
 
@@ -140,7 +148,9 @@ class CephIbmCloud():
         creds = self.credentials
         api_key = creds.get("VPC_APIKEY")
         auth_url = creds.get("VPC_AUTH_URL")
-        service_url = creds.get("RESOURCE_CONTROLLER_URL", "https://resource-controller.cloud.ibm.com")
+        service_url = creds.get(
+            "RESOURCE_CONTROLLER_URL", "https://resource-controller.cloud.ibm.com"
+        )
 
         auth_kwargs = {"apikey": api_key}
         if auth_url:
@@ -159,7 +169,9 @@ class CephIbmCloud():
         creds = self.credentials
         api_key = creds.get("VPC_APIKEY")
         auth_url = creds.get("VPC_AUTH_URL")
-        service_url = creds.get("TAGGING_URL", "https://tags.global-search-tagging.cloud.ibm.com")
+        service_url = creds.get(
+            "TAGGING_URL", "https://tags.global-search-tagging.cloud.ibm.com"
+        )
 
         auth_kwargs = {"apikey": api_key}
         if auth_url:
@@ -179,7 +191,7 @@ class CephIbmCloud():
             with open("IBM_GROUP") as f:
                 self._group = f.read().strip()
         except IOError:
-            self._group = "ceph-"+binascii.b2a_hex(os.urandom(3)).decode('utf-8')
+            self._group = "ceph-" + binascii.b2a_hex(os.urandom(3)).decode("utf-8")
             with open("IBM_GROUP", "w") as f:
                 f.write(self.group)
         return self._group
@@ -190,11 +202,11 @@ class CephIbmCloud():
             return self._cluster
 
         try:
-            with open('cluster.json') as cl:
+            with open("cluster.json") as cl:
                 self._cluster = json.load(cl)
                 return self._cluster
         except IOError:
-            print('file cluster.json not found')
+            print("file cluster.json not found")
             sys.exit(1)
 
     @property
@@ -302,7 +314,11 @@ class CephIbmCloud():
         if not resource_group_name:
             raise RuntimeError("cluster.json must include resource_group_name")
 
-        groups = self.resource_manager.list_resource_groups().get_result().get("resources", [])
+        groups = (
+            self.resource_manager.list_resource_groups()
+            .get_result()
+            .get("resources", [])
+        )
         for group in groups:
             if resource_group_name in (group.get("id"), group.get("name")):
                 self._resource_group_id = group.get("id")
@@ -322,7 +338,9 @@ class CephIbmCloud():
         region = self.cluster.get("region")
         if isinstance(vpc_config, dict):
             if not region:
-                raise RuntimeError("cluster.json must include region when vpc is a mapping")
+                raise RuntimeError(
+                    "cluster.json must include region when vpc is a mapping"
+                )
             vpc_name = vpc_config.get(region) or vpc_config.get("default")
             if not vpc_name:
                 raise RuntimeError(f"cluster.json vpc does not include region {region}")
@@ -361,11 +379,15 @@ class CephIbmCloud():
             self._subnet = subnet
             return self._subnet
 
-        raise RuntimeError(f"cannot find subnet in VPC {vpc.get('name')} for zone {zone}")
+        raise RuntimeError(
+            f"cannot find subnet in VPC {vpc.get('name')} for zone {zone}"
+        )
 
     def _get_machine_type(self, machine):
         if self._profiles is None:
-            self._profiles = self.client.list_instance_profiles().get_result().get("profiles", [])
+            self._profiles = (
+                self.client.list_instance_profiles().get_result().get("profiles", [])
+            )
 
         if machine.get("type"):
             t = machine["type"]
@@ -377,7 +399,9 @@ class CephIbmCloud():
         for profile in self._profiles:
             if t == profile.get("name"):
                 return profile
-        logging.error(f"unknown instance profile, choose among:\n{[p.get('name') for p in self._profiles]}")
+        logging.error(
+            f"unknown instance profile, choose among:\n{[p.get('name') for p in self._profiles]}"
+        )
         raise RuntimeError("unknown instance profile")
 
     def _get_machine_image(self, machine):
@@ -484,8 +508,12 @@ class CephIbmCloud():
         if account_id:
             list_params["account_id"] = account_id
         try:
-            refreshed = self.tagging.list_tags(**list_params).get_result().get("items", [])
-            instance["tags"] = [item.get("name") for item in refreshed if item.get("name")]
+            refreshed = (
+                self.tagging.list_tags(**list_params).get_result().get("items", [])
+            )
+            instance["tags"] = [
+                item.get("name") for item in refreshed if item.get("name")
+            ]
         except ApiException:
             instance["tags"] = list(tags)
 
@@ -498,7 +526,9 @@ class CephIbmCloud():
         raise RuntimeError(f"instance {instance_id} did not reach status {status}")
 
     def _get_floating_ip(self, target_id, name=None):
-        floating_ips = self.client.list_floating_ips().get_result().get("floating_ips", [])
+        floating_ips = (
+            self.client.list_floating_ips().get_result().get("floating_ips", [])
+        )
         for fip in floating_ips:
             if target_id and fip.get("target", {}).get("id") == target_id:
                 return fip
@@ -520,7 +550,9 @@ class CephIbmCloud():
         if existing:
             existing_target = existing.get("target", {}).get("id")
             if existing_target and existing_target != target_id:
-                logging.info(f"{instance.get('name')}: reattaching floating IP {fip_name}")
+                logging.info(
+                    f"{instance.get('name')}: reattaching floating IP {fip_name}"
+                )
                 updated = self.client.update_floating_ip(
                     existing.get("id"),
                     {"target": {"id": target_id}},
@@ -541,7 +573,9 @@ class CephIbmCloud():
         if not target_id:
             return
 
-        floating_ips = self.client.list_floating_ips().get_result().get("floating_ips", [])
+        floating_ips = (
+            self.client.list_floating_ips().get_result().get("floating_ips", [])
+        )
         for fip in floating_ips:
             if fip.get("target", {}).get("id") == target_id:
                 logging.info(f"deleting floating IP {fip.get('name')}")
@@ -561,8 +595,8 @@ class CephIbmCloud():
         running = []
         with ThreadPoolExecutor(max_workers=50) as executor:
             count = 0
-            for machine in self.cluster['nodes']:
-                for i in range(machine['count']):
+            for machine in self.cluster["nodes"]:
+                for i in range(machine["count"]):
                     logging.info(f"creating node {machine['group']}.{i}")
                     running.append(executor.submit(self._create, machine, i))
                     count += 1
@@ -573,38 +607,46 @@ class CephIbmCloud():
         logging.info(f"launch results: {[f.result() for f in running]}")
 
         ibm_nodes = []
-        with open("ansible_inventory", mode = 'w') as f:
-            groups = set([node['group'] for node in self.cluster['nodes']])
+        with open("ansible_inventory", mode="w") as f:
+            groups = set([node["group"] for node in self.cluster["nodes"]])
             for group in groups:
                 f.write(f"[{group}]\n")
                 group_tag = f"{self.group}-{group}"
                 for future in running:
                     ibmnode = future.result()
                     if group_tag in ibmnode.get("tags", []):
-                        private_ip = ibmnode.get("primary_network_interface", {}).get("primary_ip", {}).get("address")
+                        private_ip = (
+                            ibmnode.get("primary_network_interface", {})
+                            .get("primary_ip", {})
+                            .get("address")
+                        )
                         fip_name = self._floating_ip_name(ibmnode)
                         floating_ip = self._get_floating_ip(
                             ibmnode.get("primary_network_interface", {}).get("id"),
                             name=fip_name,
                         )
-                        public_ip = floating_ip.get("address") if floating_ip else private_ip
-                        f.write(f"\t{ibmnode.get('name')} ansible_ssh_host={public_ip} ansible_ssh_port=22 ansible_ssh_user='root' ansible_ssh_private_key_file='{self.ssh_priv_keyfile}' ceph_group='{group}'")
-                        if group == 'mons':
+                        public_ip = (
+                            floating_ip.get("address") if floating_ip else private_ip
+                        )
+                        f.write(
+                            f"\t{ibmnode.get('name')} ansible_ssh_host={public_ip} ansible_ssh_port=22 ansible_ssh_user='root' ansible_ssh_private_key_file='{self.ssh_priv_keyfile}' ceph_group='{group}'"
+                        )
+                        if group == "mons":
                             f.write(f" monitor_address={private_ip}")
                         f.write("\n")
                         l = {
-                          'id': ibmnode.get("id"),
-                          'label': ibmnode.get("name"),
-                          'ip_private': private_ip,
-                          'ip_public': public_ip,
-                          'group': self.group,
-                          'ceph_group': group,
-                          'user': 'root',
-                          'key': self.ssh_priv_keyfile,
+                            "id": ibmnode.get("id"),
+                            "label": ibmnode.get("name"),
+                            "ip_private": private_ip,
+                            "ip_public": public_ip,
+                            "group": self.group,
+                            "ceph_group": group,
+                            "user": "root",
+                            "key": self.ssh_priv_keyfile,
                         }
                         ibm_nodes.append(l)
 
-        with open("linodes", mode = 'w') as f:
+        with open("linodes", mode="w") as f:
             f.write(json.dumps(ibm_nodes, indent=4))
 
     @busy_retry()
@@ -628,12 +670,12 @@ class CephIbmCloud():
         self._do_destroy()
 
         # clear inventory file or else launch.sh won't create ibmnodes
-        ansible_inv_file = os.getenv('ANSIBLE_INVENTORY')
+        ansible_inv_file = os.getenv("ANSIBLE_INVENTORY")
         if not ansible_inv_file:
-            ansible_inv_file = 'ansible_inventory'
+            ansible_inv_file = "ansible_inventory"
         try:
             os.unlink(ansible_inv_file)
-            logging.info('removed ansible inventory file %s' % ansible_inv_file)
+            logging.info("removed ansible inventory file %s" % ansible_inv_file)
         except OSError as e:
             if e.errno != errno.ENOENT:
                 raise e
@@ -658,12 +700,14 @@ class CephIbmCloud():
 
         nuke_semaphore = BoundedSemaphore(10)
         with ThreadPoolExecutor(max_workers=50) as executor:
-            executor.map(lambda node: self._nuke(nuke_semaphore, node), self.instances())
+            executor.map(
+                lambda node: self._nuke(nuke_semaphore, node), self.instances()
+            )
 
         # clear inventory file or else launch.sh won't create ibmnodes
-        ansible_inv_file = os.getenv('ANSIBLE_INVENTORY')
+        ansible_inv_file = os.getenv("ANSIBLE_INVENTORY")
         if not ansible_inv_file:
-            ansible_inv_file = 'ansible_inventory'
+            ansible_inv_file = "ansible_inventory"
         try:
             os.unlink(ansible_inv_file)
         except OSError as e:
@@ -686,10 +730,12 @@ class CephIbmCloud():
             group = machine["group"]
             count = int(machine["count"])
             for i in range(count):
-                expected.append({
-                    "name": f"{prefix}-{i:03d}",
-                    "group": group,
-                })
+                expected.append(
+                    {
+                        "name": f"{prefix}-{i:03d}",
+                        "group": group,
+                    }
+                )
         return expected
 
     def _instance_group_from_tags(self, inst):
@@ -700,7 +746,7 @@ class CephIbmCloud():
         prefix = f"{self.group}-"
         for t in tags:
             if isinstance(t, str) and t.startswith(prefix):
-                return t[len(prefix):]
+                return t[len(prefix) :]
         return "-"
 
     def _instance_private_ip(self, inst):
@@ -780,9 +826,15 @@ class CephIbmCloud():
 
         # Unexpected nodes (IBM Cloud)
         expected_names = {n["name"] for n in expected}
-        extras = [i for i in instances if i.get("name") and i.get("name") not in expected_names]
+        extras = [
+            i
+            for i in instances
+            if i.get("name") and i.get("name") not in expected_names
+        ]
         if extras:
-            print("\nUnexpected instances (present in cluster group but not in cluster.json):")
+            print(
+                "\nUnexpected instances (present in cluster group but not in cluster.json):"
+            )
             print(header)
             print("-" * len(header))
 
@@ -828,17 +880,23 @@ class CephIbmCloud():
             raise ValueError(f"invalid instance action: {action_type}")
 
         try:
-            return self.client.create_instance_action(instance_id, type=action_type).get_result()
+            return self.client.create_instance_action(
+                instance_id, type=action_type
+            ).get_result()
         except TypeError:
             pass
 
         try:
-            return self.client.create_instance_action(instance_id, typ=action_type).get_result()
+            return self.client.create_instance_action(
+                instance_id, typ=action_type
+            ).get_result()
         except TypeError:
             pass
 
         # Fallback for SDKs that accept a body dict
-        return self.client.create_instance_action(instance_id, {"type": action_type}).get_result()
+        return self.client.create_instance_action(
+            instance_id, {"type": action_type}
+        ).get_result()
 
     def _wait_for_instance_status(self, instance_id, status, tries=60, delay=10):
         for _ in range(tries):
@@ -904,26 +962,31 @@ class CephIbmCloud():
 
 def main(argv):
     parser = argparse.ArgumentParser()
-    parser.add_argument('-k', '--key', dest='key', help='IBM Cloud credentials file')
-    parser.add_argument('--credentials-file', dest='key', help='IBM Cloud credentials file')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Enable debug logging')
-    subparsers = parser.add_subparsers(dest='cmd')
+    parser.add_argument("-k", "--key", dest="key", help="IBM Cloud credentials file")
+    parser.add_argument(
+        "--credentials-file", dest="key", help="IBM Cloud credentials file"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable debug logging"
+    )
+    subparsers = parser.add_subparsers(dest="cmd")
 
-    subparsers.add_parser('launch')
-    subparsers.add_parser('destroy')
-    subparsers.add_parser('nuke')
-    subparsers.add_parser('wait')
-    subparsers.add_parser('list')
-    subparsers.add_parser('types')
-    subparsers.add_parser('down')
-    subparsers.add_parser('up')
+    subparsers.add_parser("launch")
+    subparsers.add_parser("destroy")
+    subparsers.add_parser("nuke")
+    subparsers.add_parser("wait")
+    subparsers.add_parser("list")
+    subparsers.add_parser("types")
+    subparsers.add_parser("down")
+    subparsers.add_parser("up")
     kwargs = vars(parser.parse_args())
 
-    if kwargs.pop('verbose'):
+    if kwargs.pop("verbose"):
         logging.getLogger().setLevel(logging.DEBUG)
 
     L = CephIbmCloud()
-    return getattr(L, kwargs.pop('cmd'))(**kwargs)
+    return getattr(L, kwargs.pop("cmd"))(**kwargs)
+
 
 if __name__ == "__main__":
     main(sys.argv)
