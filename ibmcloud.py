@@ -21,6 +21,7 @@ import math
 import os
 import sys
 import time
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from threading import BoundedSemaphore
@@ -222,8 +223,65 @@ class CephIbmCloud():
         raise RuntimeError(f"cannot find SSH key: {key_name}")
 
     def instances(self, cond=None):
+        """
+        Return IBM VPC instances belonging to this cluster group.
+
+        Membership is determined via IBM Cloud Global Search (query by tag),
+        then resolved back to VPC instance objects by CRN.
+        """
+        # Global Search API base URL (same "global-search-tagging" umbrella service)
+        base_url = "https://api.global-search-tagging.cloud.ibm.com"
+        url = f"{base_url}/v3/resources/search"
+
+        # Obtain an IAM access token via the same authenticator we already use.
+        token = self.tagging.authenticator.token_manager.get_token()
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
+        # Query syntax is Global Search query language. We search by tag, then filter
+        # results down to VPC instances by resolving CRNs against list_instances().
+        # Docs: [[1]](https://cloud.ibm.com/apidocs/search)
+        payload = {
+            "query": f"tags:{self.group}",
+            "fields": ["crn"],
+        }
+
+        tagged_crns = set()
+        search_cursor = None
+
+        while True:
+            body = dict(payload)
+            if search_cursor:
+                body["search_cursor"] = search_cursor
+
+            resp = requests.post(url, headers=headers, json=body, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+
+            items = data.get("items", []) or []
+            for item in items:
+                crn = item.get("crn")
+                if crn:
+                    tagged_crns.add(crn)
+
+            search_cursor = data.get("search_cursor")
+            if not search_cursor:
+                break
+
+        if not tagged_crns:
+            return []
+
+        # Resolve CRNs -> instance objects
         instances = self.client.list_instances().get_result().get("instances", [])
-        return [i for i in instances if self.group in i.get("tags", [])]
+        result = [i for i in instances if i.get("crn") in tagged_crns]
+
+        if cond is not None:
+            result = [i for i in result if cond(i)]
+        return result
 
     def _get_zone(self, machine):
         if self._zone is not None:
