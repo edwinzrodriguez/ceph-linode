@@ -18,7 +18,7 @@
 - name: preconfigure linodes
   import_playbook: pre-config.yml
 
-- hosts: mons mgrs osds mdss grafana-servers
+- hosts: mons mgrs osds mdss grafana-servers clients
   become: yes
   tasks:
   - name: setup mon-000 ssh key
@@ -181,10 +181,10 @@
     when: not ceph_installed.stat.exists
 
   - name: config public network
-    shell: ceph config set global public_network 192.168.0.0/16
+    shell: ceph config set global public_network 10.251.0.0/16
 
   - name: config cluster_network
-    shell: ceph config set global cluster_network 192.168.0.0/16
+    shell: ceph config set global cluster_network 10.251.0.0/16
 
   - name: log to files
     shell: ceph config set global log_to_file true
