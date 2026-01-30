@@ -675,10 +675,135 @@ class CephIbmCloud():
         self._parse_common_options(**kwargs)
         raise NotImplementedError()
 
+    def _expected_nodes(self):
+        """
+        Returns a list of dicts describing the nodes that *should* exist based on cluster.json.
+        Each dict includes: name, group
+        """
+        expected = []
+        for machine in self.cluster.get("nodes", []):
+            prefix = machine["prefix"]
+            group = machine["group"]
+            count = int(machine["count"])
+            for i in range(count):
+                expected.append({
+                    "name": f"{prefix}-{i:03d}",
+                    "group": group,
+                })
+        return expected
+
+    def _instance_group_from_tags(self, inst):
+        """
+        Extract ceph group (e.g. 'osds', 'mons') from tags like: ['<cluster>', '<cluster>-osds'].
+        """
+        tags = inst.get("tags", []) or []
+        prefix = f"{self.group}-"
+        for t in tags:
+            if isinstance(t, str) and t.startswith(prefix):
+                return t[len(prefix):]
+        return "-"
+
+    def _instance_private_ip(self, inst):
+        ni = inst.get("primary_network_interface", {}) or {}
+        pip = ni.get("primary_ip", {}) or {}
+        return pip.get("address") or "-"
+
+    def _instance_public_ip(self, inst):
+        # Prefer floating IP if present, else fall back to private IP
+        private_ip = self._instance_private_ip(inst)
+        fip = self._get_floating_ip(
+            target_id=(inst.get("primary_network_interface", {}) or {}).get("id"),
+            name=self._floating_ip_name(inst),
+        )
+        return (fip.get("address") if fip else None) or private_ip or "-"
+
     def list(self, **kwargs):
         logging.info(f"list {kwargs}")
         self._parse_common_options(**kwargs)
-        raise NotImplementedError()
+
+        instances = list(self.instances())
+        by_name = {i.get("name"): i for i in instances if i.get("name")}
+
+        expected = self._expected_nodes()
+
+        NAME_W = 12
+        GROUP_W = 10
+        STATUS_W = 10
+        PUB_W = 16
+        PRIV_W = 16
+        ID_W = 40  # long IBM Cloud ids like 02w7_c06ca02d-33fd-48e5-bfaa-ea887beac92b
+
+        header = (
+            f"{'name':<{NAME_W}} "
+            f"{'group':<{GROUP_W}} "
+            f"{'status':<{STATUS_W}} "
+            f"{'ipv4_public':<{PUB_W}} "
+            f"{'ipv4_private':<{PRIV_W}} "
+            f"{'id':<{ID_W}} "
+            f"tags"
+        )
+        print(header)
+        print("-" * len(header))
+
+        # Expected nodes
+        for n in expected:
+            name = n["name"]
+            group = n["group"]
+            inst = by_name.get(name)
+
+            if not inst:
+                print(
+                    f"{name:<{NAME_W}} "
+                    f"{group:<{GROUP_W}} "
+                    f"{'MISSING':<{STATUS_W}} "
+                    f"{'-':<{PUB_W}} "
+                    f"{'-':<{PRIV_W}} "
+                    f"{'-':<{ID_W}} "
+                    f"-"
+                )
+                continue
+
+            status = inst.get("status") or "unknown"
+            pub = self._instance_public_ip(inst)
+            priv = self._instance_private_ip(inst)
+            iid = str(inst.get("id") or "-")
+            tags = inst.get("tags", []) or []
+            print(
+                f"{name:<{NAME_W}} "
+                f"{group:<{GROUP_W}} "
+                f"{status:<{STATUS_W}} "
+                f"{pub:<{PUB_W}} "
+                f"{priv:<{PRIV_W}} "
+                f"{iid:<{ID_W}} "
+                f"{','.join(tags)}"
+            )
+
+        # Unexpected nodes (IBM Cloud)
+        expected_names = {n["name"] for n in expected}
+        extras = [i for i in instances if i.get("name") and i.get("name") not in expected_names]
+        if extras:
+            print("\nUnexpected instances (present in cluster group but not in cluster.json):")
+            print(header)
+            print("-" * len(header))
+
+            for inst in sorted(extras, key=lambda x: x.get("name", "")):
+                name = inst.get("name") or "-"
+                group = self._instance_group_from_tags(inst)
+                status = inst.get("status") or "unknown"
+                pub = self._instance_public_ip(inst)
+                priv = self._instance_private_ip(inst)
+                iid = str(inst.get("id") or "-")
+                tags = inst.get("tags", []) or []
+                print(
+                    f"{name:<{NAME_W}} "
+                    f"{group:<{GROUP_W}} "
+                    f"{status:<{STATUS_W}} "
+                    f"{pub:<{PUB_W}} "
+                    f"{priv:<{PRIV_W}} "
+                    f"{iid:<{ID_W}} "
+                    f"{','.join(tags)}"
+                )
+
 
     def types(self, **kwargs):
         logging.info(f"types {kwargs}")
