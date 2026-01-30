@@ -804,13 +804,103 @@ class CephIbmCloud():
                     f"{','.join(tags)}"
                 )
 
-
     def types(self, **kwargs):
         logging.info(f"types {kwargs}")
         profiles = self.client.list_instance_profiles().get_result().get("profiles", [])
         for t in profiles:
             s = f"{t.get('name')}: cpu={t.get('vcpu_count')} memory={t.get('memory')}"
             print(s)
+
+    def _instance_name(self, inst):
+        return inst.get("name") or inst.get("id") or "<unknown>"
+
+    @busy_retry()
+    def _do_instance_action(self, instance_id, action_type):
+        """
+        Start/stop/reboot an instance.
+
+        IBM VPC SDK has had minor signature differences across versions, so we try:
+          - create_instance_action(instance_id, type=...)
+          - create_instance_action(instance_id, typ=...)
+          - create_instance_action(instance_id, {"type": ...})  (fallback)
+        """
+        if action_type not in ("start", "stop", "reboot"):
+            raise ValueError(f"invalid instance action: {action_type}")
+
+        try:
+            return self.client.create_instance_action(instance_id, type=action_type).get_result()
+        except TypeError:
+            pass
+
+        try:
+            return self.client.create_instance_action(instance_id, typ=action_type).get_result()
+        except TypeError:
+            pass
+
+        # Fallback for SDKs that accept a body dict
+        return self.client.create_instance_action(instance_id, {"type": action_type}).get_result()
+
+    def _wait_for_instance_status(self, instance_id, status, tries=60, delay=10):
+        for _ in range(tries):
+            inst = self.client.get_instance(instance_id).get_result()
+            if inst.get("status") == status:
+                return inst
+            time.sleep(delay)
+        raise RuntimeError(f"instance {instance_id} did not reach status {status}")
+
+    def down(self, **kwargs):
+        logging.info(f"down {kwargs}")
+        self._parse_common_options(**kwargs)
+
+        nodes = list(self.instances())
+        logging.info(f"stopping {len(nodes)} instances")
+
+        # Stop in parallel (same style as launch/nuke)
+        def _stop_one(inst):
+            iid = inst.get("id")
+            name = self._instance_name(inst)
+            if not iid:
+                logging.warning(f"skip instance without id: {inst}")
+                return
+
+            current = self.client.get_instance(iid).get_result()
+            if current.get("status") in ("stopped", "stopping"):
+                logging.info(f"{name}: already {current.get('status')}")
+                return
+
+            logging.info(f"{name}: stopping")
+            self._do_instance_action(iid, "stop")
+            self._wait_for_instance_status(iid, "stopped")
+
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            list(ex.map(_stop_one, nodes))
+
+    def up(self, **kwargs):
+        logging.info(f"up {kwargs}")
+        self._parse_common_options(**kwargs)
+
+        nodes = list(self.instances())
+        logging.info(f"starting {len(nodes)} instances")
+
+        def _start_one(inst):
+            iid = inst.get("id")
+            name = self._instance_name(inst)
+            if not iid:
+                logging.warning(f"skip instance without id: {inst}")
+                return
+
+            current = self.client.get_instance(iid).get_result()
+            if current.get("status") in ("running", "starting"):
+                logging.info(f"{name}: already {current.get('status')}")
+                return
+
+            logging.info(f"{name}: starting")
+            self._do_instance_action(iid, "start")
+            self._wait_for_instance_status(iid, "running")
+
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            list(ex.map(_start_one, nodes))
+
 
 def main(argv):
     parser = argparse.ArgumentParser()
@@ -825,6 +915,8 @@ def main(argv):
     subparsers.add_parser('wait')
     subparsers.add_parser('list')
     subparsers.add_parser('types')
+    subparsers.add_parser('down')
+    subparsers.add_parser('up')
     kwargs = vars(parser.parse_args())
 
     if kwargs.pop('verbose'):
