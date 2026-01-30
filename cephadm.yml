@@ -56,79 +56,14 @@
       owner: root
       src: "/tmp/cephadm-{{ RELEASE }}"
       remote_src: false
-      
-- hosts: mons
-  become: yes
-  tasks:
-  - name: build cephadm spec
-    delegate_to: mon-000
-    throttle: 1
-    blockinfile:
-      create: true
-      state: present
-      insertafter: EOF
-      dest: /root/cluster.spec
-      marker_begin: "BEGIN {{ inventory_hostname }}"
-      marker_end: "END {{ inventory_hostname }}"
-      content: |
-        service_type: host
-        hostname: {{ inventory_hostname }}
-        addr: {{ ansible_ssh_host }}
-        labels:
-          - {{ ceph_group }}
-          - _admin
-        ---
-
-- hosts: mgrs osds mdss grafana-servers
-  become: yes
-  tasks:
-  - name: build cephadm spec
-    delegate_to: mon-000
-    throttle: 1
-    blockinfile:
-      create: true
-      state: present
-      insertafter: EOF
-      dest: /root/cluster.spec
-      marker_begin: "BEGIN {{ inventory_hostname }}"
-      marker_end: "END {{ inventory_hostname }}"
-      content: |
-        service_type: host
-        hostname: {{ inventory_hostname }}
-        addr: {{ ansible_ssh_host }}
-        labels:
-          - {{ ceph_group }}
-        ---
 
 - hosts: mon-000
   become: yes
   tasks:
-  - name: set mon placement in spec
-    blockinfile:
-      state: present
-      insertafter: EOF
-      dest: /root/cluster.spec
-      marker_begin: "BEGIN mon spec"
-      marker_end: "END mon spec"
-      content: |
-        service_type: mon
-        placement:
-          label: mons
-        ---
-
-  - name: set mgr placement in spec
-    blockinfile:
-      state: present
-      insertafter: EOF
-      dest: /root/cluster.spec
-      marker_begin: "BEGIN mgr spec"
-      marker_end: "END mgr spec"
-      content: |
-        service_type: mgr
-        placement:
-          label: mgrs
-        ---
-
+  - name: reset cluster.spec (avoid mixed/invalid YAML from previous runs)
+    file:
+      path: /root/cluster.spec
+      state: absent
 
   - name: read cluster.json (base)
     set_fact:
@@ -168,43 +103,67 @@
       - groups['osds'] is defined
       - (osd_devices_by_host.get(item, []) | length) == 0
 
-  - name: set osd placement in spec (per-host services)
-    blockinfile:
-      state: present
-      insertafter: EOF
+  - name: write cephadm spec (single clean YAML stream)
+    copy:
       dest: /root/cluster.spec
-      marker_begin: "BEGIN osd spec {{ item }}"
-      marker_end: "END osd spec {{ item }}"
+      owner: root
+      group: root
+      mode: "0644"
       content: |
-        service_id: {{ item }}
+        {# Build a unique ordered list of all hosts we want in the spec #}
+        {% set host_list = [] %}
+        {% for g in ['mons','mgrs','osds','mdss','grafana-servers','clients'] %}
+        {%   for h in groups.get(g, []) %}
+        {%     if h not in host_list %}
+        {%       set _ = host_list.append(h) %}
+        {%     endif %}
+        {%   endfor %}
+        {% endfor %}
+
+        {# Host specs #}
+        {% for h in host_list %}
+        {% if not loop.first %}---
+        {% endif %}
+        service_type: host
+        hostname: {{ h }}
+        addr: {{ hostvars[h]['ansible_ssh_host'] }}
+        labels:
+          - {{ hostvars[h]['ceph_group'] }}
+        {% if hostvars[h]['ceph_group'] == 'mons' %}
+          - _admin
+        {% endif %}
+        {% endfor %}
+
+        ---
+        service_type: mon
+        placement:
+          label: mons
+
+        ---
+        service_type: mgr
+        placement:
+          label: mgrs
+
+        {# Per-host OSD service specs #}
+        {% for h in groups.get('osds', []) %}
+        ---
+        service_id: {{ h }}
         service_type: osd
         placement:
           hosts:
-            - {{ item }}
+            - {{ h }}
         data_devices:
           paths:
-        {% for dev in osd_devices_by_host.get(item, []) %}
+        {% for dev in osd_devices_by_host.get(h, []) %}
             - {{ dev }}
         {% endfor %}
-        ---
-    loop: "{{ groups['osds'] }}"
-    when:
-      - groups['osds'] is defined
-      - (osd_devices_by_host.get(item, []) | length) > 0
+        {% endfor %}
 
-  - name: set mds placement in spec
-    blockinfile:
-      state: present
-      insertafter: EOF
-      dest: /root/cluster.spec
-      marker_begin: "BEGIN mds spec"
-      marker_end: "END mds spec"
-      content: |
+        ---
         service_id: all
         service_type: mds
         placement:
           label: mdss
-        ---
 
   - name: "add {{ RELEASE }} repos"
     shell: "/root/cephadm add-repo {{ CEPHADM_REPO }}"
