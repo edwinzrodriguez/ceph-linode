@@ -78,6 +78,13 @@
       jump: ACCEPT
       comment: Allow private ip traffic.
 
+  - name: Match on IP ranges
+    iptables:
+      chain: INPUT
+      source: 10.0.0.0/8
+      jump: ACCEPT
+      comment: Allow private ip traffic.
+
   - name: Match on localhost
     iptables:
       chain: INPUT

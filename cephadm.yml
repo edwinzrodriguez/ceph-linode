@@ -41,13 +41,12 @@
   - name: fetch cephadm
     become: no
     delegate_to: localhost
-    register: cephadm
     run_once: true
-    uri:
-      force: yes
-      mode: 0755
-      return_content: yes
+    ansible.builtin.get_url:
       url: "https://download.ceph.com/rpm-{{ RELEASE }}/el9/noarch/cephadm"
+      dest: "/tmp/cephadm-{{ RELEASE }}"
+      mode: "0755"
+      force: yes
 
   - name: distribute cephadm
     copy:
@@ -55,8 +54,9 @@
       group: root
       mode: 0755
       owner: root
-      content: "{{ cephadm.content }}"
-
+      src: "/tmp/cephadm-{{ RELEASE }}"
+      remote_src: false
+      
 - hosts: mons
   become: yes
   tasks:
@@ -130,22 +130,67 @@
         ---
 
 
-  - name: set osd placement in spec
+  - name: read cluster.json (base)
+    set_fact:
+      cluster_cfg: "{{ lookup('file', 'cluster.json') | from_json }}"
+
+  - name: locate osd node config (group=osds)
+    set_fact:
+      osd_node_cfg: >-
+        {{
+          (
+            cluster_cfg.nodes
+            | selectattr('group', 'equalto', 'osds')
+            | list
+            | first
+          ) | default({}, true)
+        }}
+
+  - name: validate cluster.json has an osds node entry
+    fail:
+      msg: >-
+        cluster.json is missing a nodes[] entry with "group": "osds".
+        Add an OSD node definition that includes "osd_devices_by_host".
+    when: (osd_node_cfg | length) == 0
+
+  - name: read cluster.json (for per-host OSD devices)
+    set_fact:
+      osd_devices_by_host: "{{ osd_node_cfg.get('osd_devices_by_host', {}) }}"
+
+  - name: validate every OSD host has a device list in cluster.json
+    fail:
+      msg: >-
+        Missing OSD device list for host '{{ item }}'.
+        Add it under nodes[].osd_devices_by_host in cluster.json, e.g.:
+        "osd_devices_by_host": { "{{ item }}": ["/dev/sdX"] }
+    loop: "{{ groups['osds'] }}"
+    when:
+      - groups['osds'] is defined
+      - (osd_devices_by_host.get(item, []) | length) == 0
+
+  - name: set osd placement in spec (per-host services)
     blockinfile:
       state: present
       insertafter: EOF
       dest: /root/cluster.spec
-      marker_begin: "BEGIN osd spec"
-      marker_end: "END osd spec"
+      marker_begin: "BEGIN osd spec {{ item }}"
+      marker_end: "END osd spec {{ item }}"
       content: |
-        service_id: default
+        service_id: {{ item }}
         service_type: osd
         placement:
-          label: osds
+          hosts:
+            - {{ item }}
         data_devices:
           paths:
-            - /dev/sdc
+        {% for dev in osd_devices_by_host.get(item, []) %}
+            - {{ dev }}
+        {% endfor %}
         ---
+    loop: "{{ groups['osds'] }}"
+    when:
+      - groups['osds'] is defined
+      - (osd_devices_by_host.get(item, []) | length) > 0
 
   - name: set mds placement in spec
     blockinfile:

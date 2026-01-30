@@ -18,7 +18,12 @@
         "root_size": 32768,
         "swap_size": 32768,
         "type": 16384,
-        "group": "osds"
+        "group": "osds",
+        "osd_devices_by_host": {
+          "osd-000": ["/dev/sdb", "/dev/sdc"],
+          "osd-001": ["/dev/sdb"],
+          "osd-002": ["/dev/nvme0n1"]
+        }
       },
       {
         "count": 1,

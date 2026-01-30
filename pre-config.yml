@@ -75,11 +75,45 @@
     shell: systemctl daemon-reexec
     when: coreline.changed
 
-  - name: enable epel-release
+  - name: import EPEL GPG key
+    ansible.builtin.rpm_key:
+      state: present
+      key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+
+  - name: import EPEL-NEXT GPG key (best-effort)
+    ansible.builtin.rpm_key:
+      state: present
+      key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+    ignore_errors: yes
+
+  - name: install epel-release RPMs
     yum:
-      name: "epel-release"
-      state: latest
+      name:
+        - "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
+        - "https://dl.fedoraproject.org/pub/epel/epel-next-release-latest-9.noarch.rpm"
+      state: present
       update_cache: yes
+
+  - name: enable epel repo
+    yum_repository:
+      name: epel
+      description: "Extra Packages for Enterprise Linux 9 - $basearch"
+      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-9&arch=$basearch"
+      enabled: yes
+      gpgcheck: yes
+      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+      state: present
+
+  - name: enable epel-next repo (if available)
+    yum_repository:
+      name: epel-next
+      description: "EPEL Next for Enterprise Linux 9 - $basearch"
+      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-next-9&arch=$basearch"
+      enabled: yes
+      gpgcheck: yes
+      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+      state: present
+    ignore_errors: yes
 
   - name: update packages
     yum:
@@ -138,10 +172,49 @@
     shell: lvremove --yes /dev/ceph*/*
     ignore_errors: yes
 
+  - name: read cluster.json (base)
+    set_fact:
+      cluster_cfg: "{{ lookup('file', 'cluster.json') | from_json }}"
+
+  - name: locate osd node config (group=osds)
+    set_fact:
+      osd_node_cfg: >-
+        {{
+          (
+            cluster_cfg.nodes
+            | selectattr('group', 'equalto', 'osds')
+            | list
+            | first
+          ) | default({}, true)
+        }}
+
+  - name: validate cluster.json has an osds node entry
+    fail:
+      msg: >-
+        cluster.json is missing a nodes[] entry with "group": "osds".
+        Add an OSD node definition that includes "osd_devices_by_host".
+    when: (osd_node_cfg | length) == 0
+
+  - name: compute osd_devices_by_host from cluster.json
+    set_fact:
+      osd_devices_by_host: "{{ osd_node_cfg.get('osd_devices_by_host', {}) }}"
+
+  - name: compute devices to wipe for this host
+    set_fact:
+      osd_devices_to_wipe: "{{ osd_devices_by_host.get(inventory_hostname, []) }}"
+
+  - name: validate this OSD host has a device list in cluster.json
+    fail:
+      msg: >-
+        Missing OSD device list for host '{{ inventory_hostname }}'.
+        Add it under nodes[].osd_devices_by_host in cluster.json, e.g.:
+        "osd_devices_by_host": { "{{ inventory_hostname }}": ["/dev/sdX"] }
+    when: (osd_devices_to_wipe | length) == 0
   # This cleans up after a nuke operation (disks are not wiped)
   # This will fail if the lvm volume is busy
-  - name: clear /dev/sdc
-    shell: wipefs -a /dev/sdc
+  - name: wipe OSD devices
+    shell: "wipefs -a {{ item }}"
+    loop: "{{ osd_devices_to_wipe }}"
     ignore_errors: yes
 
   - name: check for osd logrotate config

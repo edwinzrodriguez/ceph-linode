@@ -20,9 +20,7 @@ import logging
 import math
 import os
 import sys
-import socket
 import time
-from os.path import expanduser
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from threading import BoundedSemaphore
@@ -259,12 +257,31 @@ class CephIbmCloud():
         if self._vpc is not None:
             return self._vpc
 
-        vpc_name = self.cluster.get("vpc")
-        if not vpc_name:
+        vpc_config = self.cluster.get("vpc")
+        if not vpc_config:
             raise RuntimeError("cluster.json must include vpc")
+
+        region = self.cluster.get("region")
+        if isinstance(vpc_config, dict):
+            if not region:
+                raise RuntimeError("cluster.json must include region when vpc is a mapping")
+            vpc_name = vpc_config.get(region) or vpc_config.get("default")
+            if not vpc_name:
+                raise RuntimeError(f"cluster.json vpc does not include region {region}")
+        else:
+            vpc_name = vpc_config
+
+        region_base = None
+        if region:
+            parts = region.rsplit("-", 1)
+            region_base = parts[0] if len(parts) == 2 and parts[1].isdigit() else region
 
         vpcs = self.client.list_vpcs().get_result().get("vpcs", [])
         for vpc in vpcs:
+            if region_base:
+                vpc_region = vpc.get("region", {}).get("name")
+                if vpc_region and vpc_region != region_base:
+                    continue
             if vpc_name in (vpc.get("id"), vpc.get("name")):
                 self._vpc = vpc
                 return self._vpc
@@ -481,7 +498,7 @@ class CephIbmCloud():
 
     def launch(self, **kwargs):
         logging.info(f"launch {kwargs}")
-        self._parse_common_options(**kwargs);
+        self._parse_common_options(**kwargs)
 
         running = []
         with ThreadPoolExecutor(max_workers=50) as executor:
@@ -529,7 +546,7 @@ class CephIbmCloud():
                         }
                         ibm_nodes.append(l)
 
-        with open("ibmnodes", mode = 'w') as f:
+        with open("linodes", mode = 'w') as f:
             f.write(json.dumps(ibm_nodes, indent=4))
 
     @busy_retry()
@@ -548,7 +565,7 @@ class CephIbmCloud():
 
     def destroy(self, **kwargs):
         logging.info(f"destroy {kwargs}")
-        self._parse_common_options(**kwargs);
+        self._parse_common_options(**kwargs)
 
         self._do_destroy()
 
@@ -579,7 +596,7 @@ class CephIbmCloud():
 
     def nuke(self, **kwargs):
         logging.info(f"nuke {kwargs}")
-        self._parse_common_options(**kwargs);
+        self._parse_common_options(**kwargs)
 
         nuke_semaphore = BoundedSemaphore(10)
         with ThreadPoolExecutor(max_workers=50) as executor:
@@ -597,12 +614,12 @@ class CephIbmCloud():
 
     def wait(self, **kwargs):
         logging.info(f"wait {kwargs}")
-        self._parse_common_options(**kwargs);
+        self._parse_common_options(**kwargs)
         raise NotImplementedError()
 
     def list(self, **kwargs):
         logging.info(f"list {kwargs}")
-        self._parse_common_options(**kwargs);
+        self._parse_common_options(**kwargs)
         raise NotImplementedError()
 
     def types(self, **kwargs):
