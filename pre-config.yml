@@ -244,4 +244,4 @@
   - name: install nfs-utils
     yum: name=nfs-utils state=latest update_cache=yes
 
-- import_playbook: iptables.yml
+#- import_playbook: iptables.yml
