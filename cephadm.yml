@@ -177,7 +177,7 @@
     register: ceph_installed
 
   - name: "cephadm bootstrap"
-    shell: "/root/cephadm bootstrap --mon-ip {{ monitor_address }} --ssh-private-key /root/.ssh/id_ed25519 --ssh-public-key /root/.ssh/id_ed25519.pub --apply-spec /root/cluster.spec"
+    shell: "/root/cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key /root/.ssh/id_ed25519 --ssh-public-key /root/.ssh/id_ed25519.pub --apply-spec /root/cluster.spec"
     when: not ceph_installed.stat.exists
 
   - name: config public network

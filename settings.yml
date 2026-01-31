@@ -21,3 +21,6 @@
      # CEPHADM_REPO is the branch to actually deploy
      # It can be a dev branch, e.g. CEPHADM_REPO: --dev wip-batrick-testing-20230808.012511
      CEPHADM_REPO: --release tentacle
+      # Container image to use for cephadm bootstrap (and other cephadm operations when needed)
+     #CEPH_IMAGE: "quay.io/ceph/ceph:v20.2.0"
+     CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.2.0:latest"
