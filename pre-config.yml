@@ -180,20 +180,17 @@
     set_fact:
       osd_node_cfg: >-
         {{
-          (
-            cluster_cfg.nodes
-            | selectattr('group', 'equalto', 'osds')
-            | list
-            | first
-          ) | default({}, true)
+          (cluster_cfg.nodes | selectattr('group', 'defined') | selectattr('group', 'equalto', 'osds') | list + [none]) | first
+          or
+          (cluster_cfg.nodes | selectattr('groups', 'defined') | selectattr('groups', 'contains', 'osds') | list + [none]) | first
         }}
 
   - name: validate cluster.json has an osds node entry
     fail:
       msg: >-
-        cluster.json is missing a nodes[] entry with "group": "osds".
+        cluster.json is missing a nodes[] entry with group/groups containing "osds".
         Add an OSD node definition that includes "osd_devices_by_host".
-    when: (osd_node_cfg | length) == 0
+    when: osd_node_cfg is none
 
   - name: compute osd_devices_by_host from cluster.json
     set_fact:

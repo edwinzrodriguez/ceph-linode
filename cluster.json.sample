@@ -10,7 +10,7 @@
         "count": 3,
         "prefix": "mon",
         "swap_size": 16384,
-        "group": "mons"
+        "groups": ["mons", "mgrs", "mdss"]
       },
       {
         "count": 3,

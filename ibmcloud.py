@@ -424,10 +424,44 @@ class CephIbmCloud:
         if key is not None:
             self._credentials_file = key
 
+    def _node_groups(self, machine):
+        groups = machine.get("groups")
+        if groups is None:
+            groups = [machine.get("group")] if machine.get("group") is not None else []
+        # normalize + de-dupe while preserving order
+        out = []
+        for g in groups:
+            if g and g not in out:
+                out.append(g)
+        return out
+
+    def _primary_group(self, machine):
+        # Backward compatible: prefer explicit "group", else first of "groups"
+        if machine.get("group"):
+            return machine["group"]
+        groups = self._node_groups(machine)
+        if not groups:
+            raise RuntimeError(f"node definition missing 'group'/'groups': {machine}")
+        return groups[0]
+
     @busy_retry(EAgain)
     def _do_create(self, machine, i):
         label = f"{machine['prefix']}-{i:03d}"
-        tags = [self.group, f"{self.group}-{machine['group']}"]
+
+        node_groups = self._node_groups(machine)
+        primary_group = self._primary_group(machine)
+
+        # Tag the instance with:
+        #   - the cluster tag (self.group)
+        #   - one "<cluster>-<group>" tag for EACH group the node belongs to
+        tags = [self.group] + [f"{self.group}-{g}" for g in node_groups]
+        # de-dupe while preserving order
+        deduped_tags = []
+        for t in tags:
+            if t and t not in deduped_tags:
+                deduped_tags.append(t)
+        tags = deduped_tags
+
 
         existing = None
         for inst in self.instances():
@@ -596,8 +630,9 @@ class CephIbmCloud:
         with ThreadPoolExecutor(max_workers=50) as executor:
             count = 0
             for machine in self.cluster["nodes"]:
+                primary_group = self._primary_group(machine)
                 for i in range(machine["count"]):
-                    logging.info(f"creating node {machine['group']}.{i}")
+                    logging.info(f"creating node {primary_group}.{i}")
                     running.append(executor.submit(self._create, machine, i))
                     count += 1
                     if count % 10 == 0:
@@ -608,7 +643,12 @@ class CephIbmCloud:
 
         ibm_nodes = []
         with open("ansible_inventory", mode="w") as f:
-            groups = set([node["group"] for node in self.cluster["nodes"]])
+            # Allow nodes to belong to multiple groups; build the set of all groups
+            groups = set()
+            for node in self.cluster["nodes"]:
+                for g in self._node_groups(node):
+                    groups.add(g)
+
             for group in groups:
                 f.write(f"[{group}]\n")
                 group_tag = f"{self.group}-{group}"
@@ -625,15 +665,20 @@ class CephIbmCloud:
                             ibmnode.get("primary_network_interface", {}).get("id"),
                             name=fip_name,
                         )
-                        public_ip = (
-                            floating_ip.get("address") if floating_ip else private_ip
-                        )
+                        public_ip = floating_ip.get("address") if floating_ip else private_ip
+
+                        # For backwards compatibility, keep ceph_group as the current INI section name
                         f.write(
-                            f"\t{ibmnode.get('name')} ansible_ssh_host={public_ip} ansible_ssh_port=22 ansible_ssh_user='root' ansible_ssh_private_key_file='{self.ssh_priv_keyfile}' ceph_group='{group}'"
+                            f"\t{ibmnode.get('name')} "
+                            f"ansible_ssh_host={public_ip} ansible_ssh_port=22 "
+                            f"ansible_ssh_user='root' "
+                            f"ansible_ssh_private_key_file='{self.ssh_priv_keyfile}' "
+                            f"ceph_group='{group}'"
                         )
                         if group == "mons":
                             f.write(f" monitor_address={private_ip}")
                         f.write("\n")
+
                         l = {
                             "id": ibmnode.get("id"),
                             "label": ibmnode.get("name"),

@@ -73,24 +73,35 @@
     set_fact:
       osd_node_cfg: >-
         {{
-          (
-            cluster_cfg.nodes
-            | selectattr('group', 'equalto', 'osds')
-            | list
-            | first
-          ) | default({}, true)
+          (cluster_cfg.nodes | selectattr('group', 'defined') | selectattr('group', 'equalto', 'osds') | list + [none]) | first
+          or
+          (cluster_cfg.nodes | selectattr('groups', 'defined') | selectattr('groups', 'contains', 'osds') | list + [none]) | first
         }}
 
   - name: validate cluster.json has an osds node entry
     fail:
       msg: >-
-        cluster.json is missing a nodes[] entry with "group": "osds".
+        cluster.json is missing a nodes[] entry with group/groups containing "osds".
         Add an OSD node definition that includes "osd_devices_by_host".
-    when: (osd_node_cfg | length) == 0
+    when: osd_node_cfg is none
 
   - name: read cluster.json (for per-host OSD devices)
     set_fact:
-      osd_devices_by_host: "{{ osd_node_cfg.get('osd_devices_by_host', {}) }}"
+      osd_devices_by_host: "{{ (osd_node_cfg | default({}, true)).get('osd_devices_by_host', {}) }}"
+      osd_hosts: >-
+        {%- set out = [] -%}
+        {%- for node in cluster_cfg.nodes -%}
+          {%- set gs = node.get('groups', []) -%}
+          {%- if (gs | length) == 0 and (node.get('group') is not none) -%}
+            {%- set gs = [node.get('group')] -%}
+          {%- endif -%}
+          {%- if 'osds' in gs -%}
+            {%- for i in range((node.get('count') | int)) -%}
+              {%- set _ = out.append('%s-%03d' % (node.get('prefix'), i)) -%}
+            {%- endfor -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {{ out }}
 
   - name: validate every OSD host has a device list in cluster.json
     fail:
@@ -98,10 +109,8 @@
         Missing OSD device list for host '{{ item }}'.
         Add it under nodes[].osd_devices_by_host in cluster.json, e.g.:
         "osd_devices_by_host": { "{{ item }}": ["/dev/sdX"] }
-    loop: "{{ groups['osds'] }}"
-    when:
-      - groups['osds'] is defined
-      - (osd_devices_by_host.get(item, []) | length) == 0
+    loop: "{{ osd_hosts }}"
+    when: (osd_devices_by_host.get(item, []) | length) == 0
 
   - name: write cephadm spec (single clean YAML stream)
     copy:
@@ -110,13 +119,28 @@
       group: root
       mode: "0644"
       content: |
-        {# Build a unique ordered list of all hosts we want in the spec #}
+        {# Build host_list and labels_by_host from cluster.json nodes[] #}
         {% set host_list = [] %}
-        {% for g in ['mons','mgrs','osds','mdss','grafana-servers','clients'] %}
-        {%   for h in groups.get(g, []) %}
+        {% set labels_by_host = {} %}
+
+        {% for node in cluster_cfg.nodes %}
+        {%   set gs = node.get('groups', []) %}
+        {%   if (gs | length) == 0 and (node.get('group') is not none) %}
+        {%     set gs = [node.get('group')] %}
+        {%   endif %}
+        {%   for i in range((node.get('count') | int)) %}
+        {%     set h = '%s-%03d' % (node.get('prefix'), i) %}
         {%     if h not in host_list %}
         {%       set _ = host_list.append(h) %}
         {%     endif %}
+        {%     if h not in labels_by_host %}
+        {%       set _ = labels_by_host.update({h: []}) %}
+        {%     endif %}
+        {%     for g in gs %}
+        {%       if g and g not in labels_by_host[h] %}
+        {%         set _ = labels_by_host[h].append(g) %}
+        {%       endif %}
+        {%     endfor %}
         {%   endfor %}
         {% endfor %}
 
@@ -128,8 +152,10 @@
         hostname: {{ h }}
         addr: {{ hostvars[h]['ansible_ssh_host'] }}
         labels:
-          - {{ hostvars[h]['ceph_group'] }}
-        {% if hostvars[h]['ceph_group'] == 'mons' %}
+        {% for lab in labels_by_host.get(h, []) %}
+          - {{ lab }}
+        {% endfor %}
+        {% if 'mons' in labels_by_host.get(h, []) %}
           - _admin
         {% endif %}
         {% endfor %}
@@ -145,7 +171,7 @@
           label: mgrs
 
         {# Per-host OSD service specs #}
-        {% for h in groups.get('osds', []) %}
+        {% for h in osd_hosts %}
         ---
         service_id: {{ h }}
         service_type: osd
