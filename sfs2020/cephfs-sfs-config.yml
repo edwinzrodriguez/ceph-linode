@@ -1,0 +1,202 @@
+- hosts: all
+  become: true
+  tasks:
+    - name: Fix baseos-debuginfo repository mirrors (prevent 404s)
+      ansible.builtin.shell:
+        cmd: |
+          # The baseos-debuginfo repo is often broken on CentOS Stream 9 mirrors.
+          # We fix it by:
+          # 1. Pointing baseurl to the official vault/stream mirror
+          # 2. Ensuring metalink is commented out if it's 404ing, or vice versa.
+          # We do this with sed before any dnf calls to avoid metadata sync failures.
+          
+          REPO_FILE="/etc/yum.repos.d/centos.repo"
+          if [ -f "$REPO_FILE" ]; then
+            # Fix baseurl to official mirror
+            sed -i '/^\[baseos-debuginfo\]/,/^\[/ s|^#\?baseurl=.*|baseurl=https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/debug/tree/|' "$REPO_FILE"
+            # Comment out metalink as it is currently returning 404
+            sed -i '/^\[baseos-debuginfo\]/,/^\[/ s|^metalink=|#metalink=|' "$REPO_FILE"
+          fi
+      ignore_errors: yes
+
+    - name: Ensure config-manager is available
+      ansible.builtin.dnf:
+        name: 'dnf-command(config-manager)'
+        state: present
+        update_cache: yes
+
+    - name: Check if baseos-debuginfo repository is already enabled
+      ansible.builtin.shell:
+        cmd: dnf repolist enabled | grep -q baseos-debuginfo
+      register: debuginfo_enabled
+      failed_when: false
+      changed_when: false
+
+    - name: Enable baseos-debuginfo repository
+      ansible.builtin.shell:
+        cmd: dnf config-manager --set-enabled baseos-debuginfo
+      when: debuginfo_enabled.rc != 0
+
+    - name: Update all packages
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+
+    - name: Autoremove unneeded packages installed as dependencies
+      ansible.builtin.dnf:
+        autoremove: yes
+
+    - name: Install systemtap and related packages
+      ansible.builtin.dnf:
+        name:
+          - systemtap
+          - systemtap-runtime
+          - kernel-debuginfo
+          - kernel-devel
+          - kernel-debuginfo-common-x86_64
+        enablerepo: baseos-debuginfo
+        state: present
+
+    - name: Install perf tools
+      ansible.builtin.dnf:
+        name: "perf"
+        state: latest
+
+    - name: Create perf_users group
+      ansible.builtin.group:
+        name: perf_users
+        state: present
+
+    - name: Set group ownership of perf binary
+      ansible.builtin.file:
+        path: /usr/bin/perf
+        group: perf_users
+
+    - name: Set capabilities on perf binary
+      community.general.capabilities:
+        path: /usr/bin/perf
+        capability: cap_perfmon,cap_sys_ptrace,cap_syslog=ep
+        state: present
+
+    - name: Set perf_event_paranoid to -1
+      ansible.posix.sysctl:
+        name: kernel.perf_event_paranoid
+        value: '-1'
+        state: present
+        reload: yes
+
+    - name: Install fio
+      ansible.builtin.dnf:
+        name: "fio"
+        state: latest
+
+    - name: Install iperf3
+      ansible.builtin.dnf:
+        name: "iperf3"
+        state: latest
+
+    - name: Install sysstat
+      ansible.builtin.dnf:
+        name: "sysstat"
+        state: latest
+
+    - name: Install net-tools
+      ansible.builtin.dnf:
+        name: "net-tools"
+        state: latest
+
+    - name: Install perl-open.noarch
+      ansible.builtin.dnf:
+        name: "perl-open.noarch"
+        state: latest
+
+- hosts: mons osds mdss clients
+  become: true
+  tasks:
+    - name: Ensure EPEL and CRB are enabled
+      ansible.builtin.shell:
+        cmd: |
+          dnf install -y epel-release
+          dnf config-manager --set-enabled crb
+      ignore_errors: yes
+
+    - name: Install SPECstorage2020 dependencies (DNF)
+      ansible.builtin.dnf:
+        name:
+          - python3-matplotlib
+          - python3-dateutil
+          - python3-numpy
+          - python3-pyparsing
+          - python3-six
+          - python3-scipy
+          - python3-openpyxl
+          - python3-xlsxwriter
+          - python3-cycler
+          - python3-pyyaml
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Install python3-pandas (DNF)
+      ansible.builtin.dnf:
+        name: python3-pandas
+        state: present
+      ignore_errors: yes
+      register: pandas_dnf
+
+    - name: Install python3-pandas (PIP fallback)
+      ansible.builtin.pip:
+        name: pandas
+        executable: pip3
+        state: present
+      when: pandas_dnf is failed
+
+    - name: Create /sfs2020 directory
+      ansible.builtin.file:
+        path: /sfs2020
+        state: directory
+        mode: '0755'
+
+    - name: Copy SPECstorage2020-2529.tar to /sfs2020
+      ansible.builtin.copy:
+        src: SPECstorage2020-2529.tar
+        dest: /sfs2020/SPECstorage2020-2529.tar
+        mode: '0644'
+
+    - name: Copy sfs_rc to /sfs2020
+      ansible.builtin.copy:
+        src: sfs_rc
+        dest: /sfs2020/sfs_rc
+        mode: '0644'
+
+    - name: Install git
+      ansible.builtin.dnf:
+        name: git
+        state: present
+
+    - name: Clone FlameGraph repository
+      ansible.builtin.git:
+        repo: https://github.com/brendangregg/FlameGraph.git
+        dest: /sfs2020/FlameGraph
+        clone: yes
+        update: yes
+
+    - name: Untar SPECstorage2020
+      ansible.builtin.unarchive:
+        src: "/sfs2020/SPECstorage2020-2529.tar"
+        dest: /sfs2020/
+        remote_src: true
+
+    - name: Run SM2020 install
+      ansible.builtin.shell:
+        cmd: cd /sfs2020/SPECstorage2020 && python3 SM2020 --install-dir=/SPEC2020
+      ignore_errors: yes
+
+    - name: Install pyupgrade
+      ansible.builtin.shell:
+        cmd: pip3 install pyupgrade
+
+    - name: Run pyupgrade on SM2020
+      ansible.builtin.shell:
+        cmd: pyupgrade --py3-plus /SPEC2020/SM2020
+      ignore_errors: yes
