@@ -7,35 +7,102 @@ import itertools
 import threading
 import json
 import datetime
+import configparser
+import re
 
 class CephFSPerfTest:
-    def __init__(self, config_path):
+    def __init__(self, config_path, inventory_path):
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
-        self.admin = self.config['nodes']['admin']
-        self.servers = self.config['nodes']['servers']
-        self.clients = self.config['nodes']['clients']
+        
+        self.inventory_path = inventory_path
+        self.hosts_meta = self.parse_inventory(inventory_path)
+        
+        # Determine admin, servers (OSDs/MDSs), and clients from inventory
+        # The admin server should be the first mon host in the inventory
+        mons = self.hosts_meta.get('mons', [])
+        if not mons:
+            raise ValueError("No 'mons' group found in inventory")
+        self.admin = mons[0]['name']
+        
+        # Servers are typically OSDs or MDSs. MDSConfigurationSettings.yml had servers as 3 nodes.
+        # Based on cephadm.yml, mdss/mons often overlap.
+        # Let's use 'osds' for self.servers as they are the primary storage nodes
+        self.servers = [h['name'] for h in self.hosts_meta.get('osds', [])]
+        self.clients = [h['name'] for h in self.hosts_meta.get('clients', [])]
+        
         self.fs_name = self.config['fs_name']
         self.num_filesystems = self.config.get('num_filesystems', 1)
         self.fs_names = [f"{self.fs_name}{i:02d}" for i in range(1, self.num_filesystems + 1)] if self.num_filesystems > 1 else [self.fs_name]
 
-    def run_remote(self, host, cmd, stream=False):
-        print(f"[{host}] Executing: {cmd}")
-        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", host, cmd]
+    def parse_inventory(self, path):
+        inventory = {}
+        all_hosts = {}
+        current_section = None
+
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or line.startswith(';'):
+                    continue
+
+                # Check for section header
+                if line.startswith('[') and line.endswith(']'):
+                    current_section = line[1:-1]
+                    if current_section not in inventory:
+                        inventory[current_section] = []
+                    continue
+
+                if current_section:
+                    # Host line looks like: mon-000 ansible_ssh_host=13.120.88.238 ...
+                    # Or it could be just a hostname
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    
+                    host_name = parts[0]
+                    meta = {'name': host_name}
+                    for kv in parts[1:]:
+                        if '=' in kv:
+                            k, v = kv.split('=', 1)
+                            meta[k] = v.strip("'\"")
+                    
+                    inventory[current_section].append(meta)
+                    # Use setdefault to avoid overwriting metadata if host is in multiple groups
+                    if host_name not in all_hosts:
+                        all_hosts[host_name] = meta
+                    else:
+                        all_hosts[host_name].update(meta)
+        
+        self.all_hosts = all_hosts
+        return inventory
+
+    def get_ssh_details(self, host_name):
+        meta = self.all_hosts.get(host_name, {})
+        user = meta.get('ansible_ssh_user', 'root')
+        host = meta.get('ansible_ssh_host', host_name)
+        port = meta.get('ansible_ssh_port', '22')
+        return user, host, port
+
+    def run_remote(self, host_name, cmd, stream=False):
+        user, host, port = self.get_ssh_details(host_name)
+        ssh_target = f"{user}@{host}"
+        print(f"[{host_name}] Executing: {cmd}")
+        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-p", port, ssh_target, cmd]
         if stream:
             process = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             output = []
             for line in process.stdout:
-                print(f"[{host}] {line}", end="")
+                print(f"[{host_name}] {line}", end="")
                 output.append(line)
             process.wait()
             if process.returncode != 0:
-                print(f"Error on {host}: process exited with {process.returncode}")
+                print(f"Error on {host_name}: process exited with {process.returncode}")
             return "".join(output)
         else:
             result = subprocess.run(ssh_cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                print(f"Error on {host}: {result.stderr}")
+                print(f"Error on {host_name}: {result.stderr}")
             return result.stdout
 
     def unmount_clients(self):
@@ -88,18 +155,18 @@ class CephFSPerfTest:
         print("Distributing keys and config to clients...")
         # Based on notes.txt:
         # scp /etc/ceph/ceph.conf /etc/ceph/ceph.client.0.keyring /etc/ceph/ceph.client.admin.keyring root@ceph-client:/etc/ceph/
-        # Note: The code uses self.clients which are 'user@ip'. 
-        # We need to make sure the target directory exists and we have permissions.
-        for client in self.clients:
+        # Note: The code uses self.clients which are hostnames from inventory.
+        for client_name in self.clients:
             # Create /etc/ceph if it doesn't exist
-            self.run_remote(client, "sudo mkdir -p /etc/ceph")
+            self.run_remote(client_name, "sudo mkdir -p /etc/ceph")
             
             # Copy from admin to client. 
             # Since we are running on the orchestrator machine, we might need to go through admin or do it directly if we have access.
-            # notes.txt suggests scp from admin.
             files = "/etc/ceph/ceph.conf /etc/ceph/ceph.client.0.keyring"
-            self.run_remote(self.admin, f"scp -o StrictHostKeyChecking=no {files} {client}:/tmp/")
-            self.run_remote(client, "sudo mv /tmp/ceph.conf /tmp/ceph.client.0.keyring /etc/ceph/")
+            user, host, port = self.get_ssh_details(client_name)
+            scp_cmd = f"scp -o StrictHostKeyChecking=no -P {port} {files} {user}@{host}:/tmp/"
+            self.run_remote(self.admin, scp_cmd)
+            self.run_remote(client_name, "sudo mv /tmp/ceph.conf /tmp/ceph.client.0.keyring /etc/ceph/")
 
     def generate_mds_yaml(self, fs, count):
         print(f"Generating mds.yaml for {fs} with count={count}...")
@@ -118,10 +185,8 @@ class CephFSPerfTest:
         # Select hosts with rotation
         selected_hosts = []
         for i in range(num_hosts):
-            host_full = self.servers[(start_index + i) % num_servers]
-            # Extract hostname/IP from 'user@host'
-            hostname = host_full.split('@')[-1]
-            selected_hosts.append(hostname)
+            host_name = self.servers[(start_index + i) % num_servers]
+            selected_hosts.append(host_name)
             
         mds_spec = {
             'service_type': 'mds',
@@ -135,14 +200,9 @@ class CephFSPerfTest:
         with open(local_mds_yaml, 'w') as f:
             yaml.dump(mds_spec, f)
         
-        # Copy to admin node if needed (mds_yaml_path might be on admin)
-        # Based on config: mds_yaml_path: "/vagrant/mds.yaml"
-        # If /vagrant is a shared folder, writing locally might be enough if local is /vagrant.
-        # But to be safe, we can scp it or assume it's shared.
-        # Given the previous code used self.config['mds_yaml_path'] directly in run_remote.
-        
         if self.config['mds_yaml_path'] != local_mds_yaml:
-             subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", local_mds_yaml, f"{self.admin}:{self.config['mds_yaml_path']}"])
+             user, host, port = self.get_ssh_details(self.admin)
+             subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, local_mds_yaml, f"{user}@{host}:{self.config['mds_yaml_path']}"])
 
     def apply_mds_settings(self, settings):
         print("Applying MDS performance settings...")
@@ -165,12 +225,13 @@ class CephFSPerfTest:
         secret_key = self.run_remote(self.admin, "sudo ceph auth get-key client.0").strip()
         
         for fs in self.fs_names:
-            for client in self.clients:
+            for client_name in self.clients:
                 mount_path = f"/mnt/cephfs_{fs}"
-                self.run_remote(client, f"sudo mkdir -p {mount_path}")
+                self.run_remote(client_name, f"sudo mkdir -p {mount_path}")
                 mount_cmd = f"sudo mount -t ceph {mon_addrs}:/ {mount_path} -o name=0,secret={secret_key},fs={fs}"
-                self.run_remote(client, mount_cmd)
-                self.run_remote(client, f"sudo chown vagrant:vagrant {mount_path}")
+                self.run_remote(client_name, mount_cmd)
+                user, _, _ = self.get_ssh_details(client_name)
+                self.run_remote(client_name, f"sudo chown {user}:{user} {mount_path}")
 
     def prepare_specstorage(self):
         print("Generating SPECSTORAGE 2020 config...")
@@ -178,12 +239,10 @@ class CephFSPerfTest:
         output_path = self.config['specstorage']['output_path']
         
         client_mountpoints = []
-        for client in self.clients:
-            # Extract hostname from 'user@hostname'
-            hostname = client.split('@')[-1]
+        for client_name in self.clients:
             for fs in self.fs_names:
                 mount_path = f"/mnt/cephfs_{fs}"
-                client_mountpoints.append(f"{hostname}:{mount_path}")
+                client_mountpoints.append(f"{client_name}:{mount_path}")
         
         mountpoints_str = " ".join(client_mountpoints)
         
@@ -196,7 +255,8 @@ class CephFSPerfTest:
         with open(temp_file, 'w') as f:
             f.write(new_content)
         
-        subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", temp_file, f"{self.admin}:{output_path}"])
+        user, host, port = self.get_ssh_details(self.admin)
+        subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, temp_file, f"{user}@{host}:{output_path}"])
         os.remove(temp_file)
 
     def run_workload(self, settings, shared_timestamp=None):
@@ -236,10 +296,11 @@ class CephFSPerfTest:
         settings_json = json.dumps(payload)
         print(f"Running SPECSTORAGE on {self.admin}...")
         
-        host = self.admin
+        host_name = self.admin
+        user, host, port = self.get_ssh_details(host_name)
         full_cmd = f"{cmd} -f {cfg} --settings '{settings_json}'"
-        print(f"[{host}] Executing: {full_cmd}")
-        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", host, full_cmd]
+        print(f"[{host_name}] Executing: {full_cmd}")
+        ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-p", port, f"{user}@{host}", full_cmd]
         
         current_loadpoint = 0
         run_phase_started = False
@@ -248,7 +309,7 @@ class CephFSPerfTest:
         process = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
         output = []
         for line in process.stdout:
-            print(f"[{host}] {line}", end="")
+            print(f"[{host_name}] {line}", end="")
             output.append(line)
             
             if perf_record_enabled:
@@ -274,35 +335,36 @@ class CephFSPerfTest:
         for t in perf_threads:
             t.join()
         if process.returncode != 0:
-            print(f"Error on {host}: process exited with {process.returncode}")
+            print(f"Error on {host_name}: process exited with {process.returncode}")
         return "".join(output)
 
     def execute_perf_record(self, loadpoint, results_dir=None):
-        perf_script = self.config['specstorage'].get('perf_record_script', '/vagrant/perf_record.py')
+        perf_script = self.config['specstorage'].get('perf_record_script', '/sfs2020/perf_record.py')
         perf_executable = self.config['specstorage'].get('perf_record_executable', 'ceph-mds')
         perf_duration = self.config['specstorage'].get('perf_record_duration', 5)
         flamegraph_path = self.config['specstorage'].get('perf_record_flamegraph_path', '')
         processes = []
-        for server in self.servers:
-            print(f"[{server}] Starting parallel perf record for Load Point {loadpoint} using {perf_script} --loadpoint {loadpoint} --server {server} --executable {perf_executable} --duration {perf_duration}")
+        for server_name in self.servers:
+            print(f"[{server_name}] Starting parallel perf record for Load Point {loadpoint}")
             fg_arg = f" --flamegraph-path {flamegraph_path}" if flamegraph_path else ""
-            ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", server, f"python3 {perf_script} --loadpoint {loadpoint} --server {server} --executable {perf_executable} --duration {perf_duration}{fg_arg}"]
+            user, host, port = self.get_ssh_details(server_name)
+            ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-p", port, f"{user}@{host}", f"python3 {perf_script} --loadpoint {loadpoint} --server {server_name} --executable {perf_executable} --duration {perf_duration}{fg_arg}"]
             p = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, stdin=subprocess.DEVNULL)
-            processes.append((server, p))
+            processes.append((server_name, p))
 
-        def collect_output(server, p):
+        def collect_output(server_name, p):
             stdout_bytes, _ = p.communicate()
             stdout = stdout_bytes.decode('utf-8', errors='replace')
             if p.returncode != 0:
-                print(f"Error on {server} during perf record: {stdout}")
+                print(f"Error on {server_name} during perf record: {stdout}")
             else:
                 if stdout_bytes:
-                    print(f"[{server}] Output:\n{stdout}")
-                print(f"[{server}] Finished perf record for Load Point {loadpoint}.")
+                    print(f"[{server_name}] Output:\n{stdout}")
+                print(f"[{server_name}] Finished perf record for Load Point {loadpoint}.")
 
         threads = []
-        for server, p in processes:
-            t = threading.Thread(target=collect_output, args=(server, p))
+        for server_name, p in processes:
+            t = threading.Thread(target=collect_output, args=(server_name, p))
             t.start()
             threads.append(t)
         
@@ -311,38 +373,38 @@ class CephFSPerfTest:
 
         if results_dir:
             print(f"Copying perf reports to {results_dir} on {self.admin}...")
-            for server in self.servers:
-                s_name = server.split('@')[-1]
+            admin_user, admin_host, admin_port = self.get_ssh_details(self.admin)
+            for server_name in self.servers:
                 lp_tag = f"{int(loadpoint):02d}"
                 # Find all report and script files for this loadpoint using wildcard
                 find_cmd = (
-                    f"ls {s_name}_lp{lp_tag}_*_perf_report.txt "
-                    f"{s_name}_lp{lp_tag}_*_perf_script.txt "
-                    f"{s_name}_lp{lp_tag}_*_perf.data "
-                    f"{s_name}_lp{lp_tag}_*_perf_script.svg"
+                    f"ls {server_name}_lp{lp_tag}_*_perf_report.txt "
+                    f"{server_name}_lp{lp_tag}_*_perf_script.txt "
+                    f"{server_name}_lp{lp_tag}_*_perf.data "
+                    f"{server_name}_lp{lp_tag}_*_perf_script.svg"
                 )
-                reports_output = self.run_remote(server, find_cmd).strip()
+                reports_output = self.run_remote(server_name, find_cmd).strip()
                 
                 if reports_output and "No such file or directory" not in reports_output:
                     report_files = reports_output.split()
                     for report_file in report_files:
                         # Copy from server to admin's results_dir
-                        can_read = self.run_remote(server, f"test -r {report_file} && echo OK || echo NO").strip()
+                        can_read = self.run_remote(server_name, f"test -r {report_file} && echo OK || echo NO").strip()
                         if can_read == "OK":
-                            copy_cmd = f"scp -o StrictHostKeyChecking=no {report_file} {self.admin}:{results_dir}/"
-                            self.run_remote(server, copy_cmd)
+                            copy_cmd = f"scp -o StrictHostKeyChecking=no -P {admin_port} {report_file} {admin_user}@{admin_host}:{results_dir}/"
+                            self.run_remote(server_name, copy_cmd)
                         else:
-                            remote_user = server.split('@')[0] if '@' in server else "vagrant"
+                            user, host, port = self.get_ssh_details(server_name)
                             tmp_path = f"/tmp/{os.path.basename(report_file)}"
-                            print(f"[{server}] Permission denied for {report_file}, retrying via {tmp_path}...")
-                            self.run_remote(server, f"sudo -n cp {report_file} {tmp_path}")
-                            self.run_remote(server, f"sudo -n chown {remote_user}:{remote_user} {tmp_path}")
-                            self.run_remote(server, f"sudo -n chmod 0644 {tmp_path}")
-                            copy_tmp_cmd = f"scp -o StrictHostKeyChecking=no {tmp_path} {self.admin}:{results_dir}/"
-                            self.run_remote(server, copy_tmp_cmd)
-                            self.run_remote(server, f"sudo -n rm -f {tmp_path}")
+                            print(f"[{server_name}] Permission denied for {report_file}, retrying via {tmp_path}...")
+                            self.run_remote(server_name, f"sudo -n cp {report_file} {tmp_path}")
+                            self.run_remote(server_name, f"sudo -n chown {user}:{user} {tmp_path}")
+                            self.run_remote(server_name, f"sudo -n chmod 0644 {tmp_path}")
+                            copy_tmp_cmd = f"scp -o StrictHostKeyChecking=no -P {admin_port} {tmp_path} {admin_user}@{admin_host}:{results_dir}/"
+                            self.run_remote(server_name, copy_tmp_cmd)
+                            self.run_remote(server_name, f"sudo -n rm -f {tmp_path}")
                 else:
-                    print(f"[{server}] No report files found for Load Point {loadpoint}, skipping copy.")
+                    print(f"[{server_name}] No report files found for Load Point {loadpoint}, skipping copy.")
 
     def parse_si_unit(self, value):
         if not isinstance(value, str):
@@ -433,9 +495,9 @@ class CephFSPerfTest:
             self.unmount_clients()
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python perf_test.py <config.yaml>")
+    if len(sys.argv) < 3:
+        print("Usage: python cephfs_perf_test.py <config.yaml> <ansible_inventory>")
         sys.exit(1)
     
-    tester = CephFSPerfTest(sys.argv[1])
+    tester = CephFSPerfTest(sys.argv[1], sys.argv[2])
     tester.execute_test_matrix()
