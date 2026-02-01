@@ -35,7 +35,7 @@
       path: /root/.ssh/authorized_keys
       line: "{{ cephadm_key.public_key }}"
 
-- hosts: mons clients
+- hosts: mons mgrs osds mdss clients
   become: yes
   tasks:
   - name: fetch cephadm
@@ -56,6 +56,12 @@
       owner: root
       src: "/tmp/cephadm-{{ RELEASE }}"
       remote_src: false
+
+  - name: "add {{ RELEASE }} repos"
+    shell: "/root/cephadm add-repo {{ CEPHADM_REPO }}"
+
+  - name: "install {{ RELEASE }}"
+    shell: "/root/cephadm install ceph-common"
 
 - hosts: mon-000
   become: yes
@@ -190,12 +196,6 @@
         service_type: mds
         placement:
           label: mdss
-
-  - name: "add {{ RELEASE }} repos"
-    shell: "/root/cephadm add-repo {{ CEPHADM_REPO }}"
-
-  - name: "install {{ RELEASE }}"
-    shell: "/root/cephadm install ceph-common"
 
   - name: check ceph already bootstrapped
     stat:
