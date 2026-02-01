@@ -905,7 +905,25 @@ class CephIbmCloud:
         logging.info(f"types {kwargs}")
         profiles = self.client.list_instance_profiles().get_result().get("profiles", [])
         for t in profiles:
-            s = f"{t.get('name')}: cpu={t.get('vcpu_count')} memory={t.get('memory')}"
+            name = t.get("name")
+            cpus = t.get("vcpu_count", {}).get("value") or t.get("vcpu_count")
+            mem = t.get("memory", {}).get("value") or t.get("memory")
+            bandwidth = t.get("bandwidth", {}).get("value") or t.get("bandwidth")
+            
+            s = f"{name}: cpu={cpus} memory={mem} bandwidth={bandwidth}Mbps"
+            
+            disks = t.get("disks", [])
+            if disks:
+                disk_info = []
+                total_disk_count = 0
+                for d in disks:
+                    size = d.get("size", {}).get("value") or d.get("size")
+                    interface = d.get("interface")
+                    quantity = d.get("quantity", {}).get("value") or 1
+                    total_disk_count += quantity
+                    disk_info.append(f"{quantity}x{size}GB({interface})")
+                s += f" disks={total_disk_count}[{', '.join(disk_info)}]"
+            
             print(s)
 
     def _instance_name(self, inst):
