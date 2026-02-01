@@ -25,9 +25,13 @@ class CephFSPerfTest:
             raise ValueError("No 'mons' group found in inventory")
         self.admin = mons[0]['name']
         
-        # Servers are typically OSDs or MDSs. MDSConfigurationSettings.yml had servers as 3 nodes.
-        # Based on cephadm.yml, mdss/mons often overlap.
-        # Let's use 'osds' for self.servers as they are the primary storage nodes
+        # mdss group for MDS placement
+        self.mdss = [h['name'] for h in self.hosts_meta.get('mdss', [])]
+        if not self.mdss:
+            print("Warning: No 'mdss' group found in inventory, falling back to 'osds' for MDS placement.")
+            self.mdss = [h['name'] for h in self.hosts_meta.get('osds', [])]
+
+        # Servers are typically OSDs.
         self.servers = [h['name'] for h in self.hosts_meta.get('osds', [])]
         self.clients = [h['name'] for h in self.hosts_meta.get('clients', [])]
         
@@ -171,8 +175,8 @@ class CephFSPerfTest:
     def generate_mds_yaml(self, fs, count):
         print(f"Generating mds.yaml for {fs} with count={count}...")
         
-        num_servers = len(self.servers)
-        num_hosts = min(count + 2, num_servers)
+        num_mdss = len(self.mdss)
+        num_hosts = min(count + 2, num_mdss)
         
         # Determine rotation index based on fs_name
         try:
@@ -180,12 +184,12 @@ class CephFSPerfTest:
         except ValueError:
             fs_index = 0
             
-        start_index = fs_index % num_servers
+        start_index = fs_index % num_mdss
         
-        # Select hosts with rotation
+        # Select hosts with rotation from mdss group
         selected_hosts = []
         for i in range(num_hosts):
-            host_name = self.servers[(start_index + i) % num_servers]
+            host_name = self.mdss[(start_index + i) % num_mdss]
             selected_hosts.append(host_name)
             
         mds_spec = {
@@ -344,7 +348,7 @@ class CephFSPerfTest:
         perf_duration = self.config['specstorage'].get('perf_record_duration', 5)
         flamegraph_path = self.config['specstorage'].get('perf_record_flamegraph_path', '')
         processes = []
-        for server_name in self.servers:
+        for server_name in self.mdss:
             print(f"[{server_name}] Starting parallel perf record for Load Point {loadpoint}")
             fg_arg = f" --flamegraph-path {flamegraph_path}" if flamegraph_path else ""
             user, host, port = self.get_ssh_details(server_name)
@@ -374,7 +378,7 @@ class CephFSPerfTest:
         if results_dir:
             print(f"Copying perf reports to {results_dir} on {self.admin}...")
             admin_user, admin_host, admin_port = self.get_ssh_details(self.admin)
-            for server_name in self.servers:
+            for server_name in self.mdss:
                 lp_tag = f"{int(loadpoint):02d}"
                 # Find all report and script files for this loadpoint using wildcard
                 find_cmd = (
