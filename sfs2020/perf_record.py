@@ -125,7 +125,7 @@ def _container_exec(runtime, container_id, cmd_argv):
     )
 
 def _resolve_flamegraph_dir(configured_dir):
-    default_dir = "/vagrant/FlameGraph"
+    default_dir = "/sfs2020/FlameGraph"
     if os.path.isdir(default_dir):
         return default_dir
     if configured_dir and os.path.isdir(configured_dir):
@@ -259,7 +259,7 @@ def main():
     parser.add_argument('--server', required=True, help='Server hostname/IP')
     parser.add_argument('--executable', default='ceph-mds', help='Executable name to capture (default: ceph-mds)')
     parser.add_argument('--duration', default='5', help='Capture duration in seconds (default: 5)')
-    parser.add_argument('--flamegraph-path', default='', help='Path to FlameGraph project (used if /vagrant/FlameGraph is missing)')
+    parser.add_argument('--flamegraph-path', default='', help='Path to FlameGraph project (used if /sfs2020/FlameGraph is missing)')
 
     args = parser.parse_args()
 
