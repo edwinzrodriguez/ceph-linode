@@ -169,6 +169,14 @@
         dest: /sfs2020/sfs_rc
         mode: '0644'
 
+    - name: Copy sfs2020 python scripts to /sfs2020
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /sfs2020/
+        mode: '0755'
+      with_fileglob:
+        - "*.py"
+
     - name: Install git
       ansible.builtin.dnf:
         name: git
