@@ -46,7 +46,7 @@
 ##############################################################################
 
 #CLIENT_MOUNTPOINTS=ceph-client:/mnt/cephfs
-USER=vagrant
+USER=root
 PASSWORD=
 
 ##############################################################################
@@ -55,8 +55,8 @@ PASSWORD=
 # In heterogeneous modes EXEC_PATH must be set to a Unix path.
 #  **** This field cannot be empty ****
 ##############################################################################
-EXEC_PATH=/home/vagrant/SPEC2020/binaries/linux/x86_64/netmist
-NETMIST_LOGS=/home/vagrant/SPEC2020/test1
+EXEC_PATH=/sfs2020/SPECstorage2020//binaries/linux/x86_64/netmist
+NETMIST_LOGS=/sfs2020/SPECstorage2020//test1
 
 ##############################################################################
 # Legacy mode + heterogeneous client types:
