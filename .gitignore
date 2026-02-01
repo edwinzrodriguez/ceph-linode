@@ -8,3 +8,4 @@ ibm-credentials.env
 apikey.json
 IBM_GROUP
 **/.idea/
+/sfs2020/MDSConfigurationSettings.yml
