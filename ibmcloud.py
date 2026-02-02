@@ -236,10 +236,10 @@ class CephIbmCloud:
 
     def instances(self, cond=None):
         """
-        Return IBM VPC instances belonging to this cluster group.
+        Return IBM VPC instances and bare metal servers belonging to this cluster group.
 
         Membership is determined via IBM Cloud Global Search (query by tag),
-        then resolved back to VPC instance objects by CRN.
+        then resolved back to VPC resource objects by CRN.
         """
         # Global Search API base URL (same "global-search-tagging" umbrella service)
         base_url = "https://api.global-search-tagging.cloud.ibm.com"
@@ -287,8 +287,14 @@ class CephIbmCloud:
         if not tagged_crns:
             return []
 
-        # Resolve CRNs -> instance objects
+        # Resolve CRNs -> instance/bare metal objects
         instances = self.client.list_instances().get_result().get("instances", [])
+        try:
+            bare_metals = self.client.list_bare_metal_servers().get_result().get("servers", [])
+            instances.extend(bare_metals)
+        except (ApiException, AttributeError):
+            pass
+
         result = [i for i in instances if i.get("crn") in tagged_crns]
 
         if cond is not None:
@@ -385,9 +391,19 @@ class CephIbmCloud:
 
     def _get_machine_type(self, machine):
         if self._profiles is None:
-            self._profiles = (
-                self.client.list_instance_profiles().get_result().get("profiles", [])
-            )
+            # Consolidate virtual server profiles and bare metal profiles
+            profiles = self.client.list_instance_profiles().get_result().get("profiles", [])
+            try:
+                bm_profiles = (
+                    self.client.list_bare_metal_server_profiles()
+                    .get_result()
+                    .get("profiles", [])
+                )
+                profiles.extend(bm_profiles)
+            except (ApiException, AttributeError) as e:
+                logging.warning(f"Failed to fetch bare metal profiles: {e}")
+
+            self._profiles = profiles
 
         if machine.get("type"):
             t = machine["type"]
@@ -491,8 +507,23 @@ class CephIbmCloud:
                 "resource_group": {"id": resource_group_id},
             }
 
+            # Check if this is a bare metal profile
+            is_bare_metal = (
+                profile.get("family") == "bare_metal"
+                or "metal" in profile.get("name", "").lower()
+            )
+
+            if is_bare_metal:
+                # Bare metal servers use a different prototype structure.
+                # 'keys' and 'image' must be placed inside an 'initialization' object.
+                # See: https://cloud.ibm.com/apidocs/vpc#create-bare-metal-server
+                instance_prototype["initialization"] = {
+                    "keys": instance_prototype.pop("keys"),
+                    "image": instance_prototype.pop("image"),
+                }
+
             root_size = machine.get("root_size")
-            if root_size:
+            if root_size and not is_bare_metal:
                 capacity_gb = max(1, int(math.ceil(root_size / 1024)))
                 instance_prototype["boot_volume_attachment"] = {
                     "delete_volume_on_instance_delete": True,
@@ -505,7 +536,12 @@ class CephIbmCloud:
 
             with releasing(self.create_semaphore):
                 logging.info(f"{label}: creating {profile.get('name')} in {zone}")
-                instance = self.client.create_instance(instance_prototype).get_result()
+                if is_bare_metal:
+                    # Bare metal creation has a slightly different prototype structure
+                    # notably, it doesn't support boot_volume_attachment in the same way
+                    instance = self.client.create_bare_metal_server(instance_prototype).get_result()
+                else:
+                    instance = self.client.create_instance(instance_prototype).get_result()
 
         with releasing(self.config_semaphore):
             instance = self._wait_for_instance_status(instance.get("id"), "running")
@@ -553,7 +589,15 @@ class CephIbmCloud:
 
     def _wait_for_instance_status(self, instance_id, status, tries=60, delay=10):
         for _ in range(tries):
-            instance = self.client.get_instance(instance_id).get_result()
+            try:
+                instance = self.client.get_instance(instance_id).get_result()
+            except ApiException:
+                # Fallback to bare metal if not a virtual instance
+                try:
+                    instance = self.client.get_bare_metal_server(instance_id).get_result()
+                except ApiException:
+                    raise
+
             if instance.get("status") == status:
                 return instance
             time.sleep(delay)
@@ -697,9 +741,17 @@ class CephIbmCloud:
     @busy_retry()
     def _do_destroy(self):
         for i in list(self.instances()):
+            iid = i.get("id")
             logging.info(f"destroy {i.get('name')}")
             self._delete_floating_ips(i)
-            self.client.delete_instance(i.get("id"))
+            try:
+                self.client.delete_instance(iid)
+            except ApiException:
+                # Fallback for bare metal
+                try:
+                    self.client.delete_bare_metal_server(iid)
+                except ApiException:
+                    raise
 
     def _destroy(self, *args, **kwargs):
         try:
@@ -728,8 +780,16 @@ class CephIbmCloud:
     @busy_retry()
     def _do_nuke(self, sema, node):
         with releasing(sema):
+            iid = node.get("id")
             self._delete_floating_ips(node)
-            self.client.delete_instance(node.get("id"))
+            try:
+                self.client.delete_instance(iid)
+            except ApiException:
+                # Fallback for bare metal
+                try:
+                    self.client.delete_bare_metal_server(iid)
+                except ApiException:
+                    raise
             time.sleep(2)
 
     def _nuke(self, *args, **kwargs):
@@ -903,14 +963,26 @@ class CephIbmCloud:
 
     def types(self, **kwargs):
         logging.info(f"types {kwargs}")
+        
+        # Virtual Server Profiles
         profiles = self.client.list_instance_profiles().get_result().get("profiles", [])
+        
+        # Bare Metal Profiles
+        try:
+            bm_profiles = self.client.list_bare_metal_server_profiles().get_result().get("profiles", [])
+            profiles.extend(bm_profiles)
+        except (ApiException, AttributeError):
+            pass
+
         for t in profiles:
             name = t.get("name")
             cpus = t.get("vcpu_count", {}).get("value") or t.get("vcpu_count")
             mem = t.get("memory", {}).get("value") or t.get("memory")
             bandwidth = t.get("bandwidth", {}).get("value") or t.get("bandwidth")
             
-            s = f"{name}: cpu={cpus} memory={mem} bandwidth={bandwidth}Mbps"
+            s = f"{name}: cpu={cpus} memory={mem}"
+            if bandwidth:
+                s += f" bandwidth={bandwidth}Mbps"
             
             disks = t.get("disks", [])
             if disks:
@@ -963,9 +1035,17 @@ class CephIbmCloud:
 
     def _wait_for_instance_status(self, instance_id, status, tries=60, delay=10):
         for _ in range(tries):
-            inst = self.client.get_instance(instance_id).get_result()
-            if inst.get("status") == status:
-                return inst
+            try:
+                instance = self.client.get_instance(instance_id).get_result()
+            except ApiException:
+                # Fallback to bare metal if not a virtual instance
+                try:
+                    instance = self.client.get_bare_metal_server(instance_id).get_result()
+                except ApiException:
+                    raise
+
+            if instance.get("status") == status:
+                return instance
             time.sleep(delay)
         raise RuntimeError(f"instance {instance_id} did not reach status {status}")
 
@@ -984,13 +1064,22 @@ class CephIbmCloud:
                 logging.warning(f"skip instance without id: {inst}")
                 return
 
-            current = self.client.get_instance(iid).get_result()
+            try:
+                current = self.client.get_instance(iid).get_result()
+                is_bare_metal = False
+            except ApiException:
+                current = self.client.get_bare_metal_server(iid).get_result()
+                is_bare_metal = True
+
             if current.get("status") in ("stopped", "stopping"):
                 logging.info(f"{name}: already {current.get('status')}")
                 return
 
             logging.info(f"{name}: stopping")
-            self._do_instance_action(iid, "stop")
+            if is_bare_metal:
+                self.client.create_bare_metal_server_action(iid, type="stop")
+            else:
+                self._do_instance_action(iid, "stop")
             self._wait_for_instance_status(iid, "stopped")
 
         with ThreadPoolExecutor(max_workers=20) as ex:
@@ -1010,13 +1099,22 @@ class CephIbmCloud:
                 logging.warning(f"skip instance without id: {inst}")
                 return
 
-            current = self.client.get_instance(iid).get_result()
+            try:
+                current = self.client.get_instance(iid).get_result()
+                is_bare_metal = False
+            except ApiException:
+                current = self.client.get_bare_metal_server(iid).get_result()
+                is_bare_metal = True
+
             if current.get("status") in ("running", "starting"):
                 logging.info(f"{name}: already {current.get('status')}")
                 return
 
             logging.info(f"{name}: starting")
-            self._do_instance_action(iid, "start")
+            if is_bare_metal:
+                self.client.create_bare_metal_server_action(iid, type="start")
+            else:
+                self._do_instance_action(iid, "start")
             self._wait_for_instance_status(iid, "running")
 
         with ThreadPoolExecutor(max_workers=20) as ex:
