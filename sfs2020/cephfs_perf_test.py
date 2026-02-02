@@ -484,8 +484,18 @@ class CephFSPerfTest:
             r_config = self.config['mds_settings'][k]
             # Parse SI units if they are strings
             parsed_r = [self.parse_si_unit(v) for v in r_config]
-            ranges.append(range(*parsed_r))
-        
+
+            # Decide between range and exact values
+            if len(parsed_r) == 3:
+                # Maintain backward compatibility for [start, stop, step]
+                ranges.append(range(*parsed_r))
+            elif len(parsed_r) in [1, 2] and all(isinstance(x, int) and x < 1000 for x in parsed_r):
+                # Small integers, likely [stop] or [start, stop] range
+                ranges.append(range(*parsed_r))
+            else:
+                # Everything else is exact values (including list of 4+ elements)
+                ranges.append(parsed_r)
+
         for values in itertools.product(*ranges):
             current_settings = dict(zip(keys, values))
             print(f"\n--- Starting Test Iteration: {current_settings} ---")
