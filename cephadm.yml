@@ -35,6 +35,35 @@
       path: /root/.ssh/authorized_keys
       line: "{{ cephadm_key.public_key }}"
 
+- hosts: mons
+  become: yes
+  tasks:
+  - name: setup mon-000 ssh key (fetch)
+    delegate_to: mon-000
+    run_once: true
+    community.crypto.openssh_keypair:
+      path: /root/.ssh/id_ed25519
+      type: ed25519
+    register: cephadm_key_info
+
+  - name: distribute cephadm private key to mons
+    copy:
+      dest: /root/.ssh/id_ed25519
+      content: "{{ cephadm_key_info.private_key }}"
+      owner: root
+      group: root
+      mode: '0600'
+    when: inventory_hostname != 'mon-000'
+
+  - name: distribute cephadm public key to mons
+    copy:
+      dest: /root/.ssh/id_ed25519.pub
+      content: "{{ cephadm_key_info.public_key }}"
+      owner: root
+      group: root
+      mode: '0644'
+    when: inventory_hostname != 'mon-000'
+
 - hosts: mons mgrs osds mdss clients
   become: yes
   tasks:
