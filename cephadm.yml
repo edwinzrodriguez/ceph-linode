@@ -38,18 +38,24 @@
 - hosts: mons
   become: yes
   tasks:
-  - name: setup mon-000 ssh key (fetch)
+  - name: read cephadm private key from mon-000
+    slurp:
+      src: /root/.ssh/id_ed25519
     delegate_to: mon-000
     run_once: true
-    community.crypto.openssh_keypair:
-      path: /root/.ssh/id_ed25519
-      type: ed25519
-    register: cephadm_key_info
+    register: cephadm_priv_key_b64
+
+  - name: read cephadm public key from mon-000
+    slurp:
+      src: /root/.ssh/id_ed25519.pub
+    delegate_to: mon-000
+    run_once: true
+    register: cephadm_pub_key_b64
 
   - name: distribute cephadm private key to mons
     copy:
       dest: /root/.ssh/id_ed25519
-      content: "{{ cephadm_key_info.private_key }}"
+      content: "{{ cephadm_priv_key_b64.content | b64decode }}"
       owner: root
       group: root
       mode: '0600'
@@ -58,11 +64,26 @@
   - name: distribute cephadm public key to mons
     copy:
       dest: /root/.ssh/id_ed25519.pub
-      content: "{{ cephadm_key_info.public_key }}"
+      content: "{{ cephadm_pub_key_b64.content | b64decode }}"
       owner: root
       group: root
       mode: '0644'
     when: inventory_hostname != 'mon-000'
+
+  - name: gather host keys from all nodes
+    shell: "ssh-keyscan -H {{ hostvars[item].ansible_ssh_host }} {{ item }}"
+    loop: "{{ groups['mons'] + groups['mgrs'] + groups['osds'] + groups['mdss'] + groups['clients'] | unique }}"
+    register: host_keys
+    changed_when: false
+
+  - name: update known_hosts on mons
+    known_hosts:
+      name: "{{ item.item }}"
+      key: "{{ item.stdout }}"
+      path: /root/.ssh/known_hosts
+      state: present
+    loop: "{{ host_keys.results }}"
+    when: item.stdout is defined and item.stdout != ""
 
 - hosts: mons mgrs osds mdss clients
   become: yes
