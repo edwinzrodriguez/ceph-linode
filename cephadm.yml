@@ -241,11 +241,6 @@
         {% endfor %}
         {% endfor %}
 
-        ---
-        service_id: all
-        service_type: mds
-        placement:
-          label: mdss
 
   - name: check ceph already bootstrapped
     stat:
