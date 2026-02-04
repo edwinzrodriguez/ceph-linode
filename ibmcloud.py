@@ -832,7 +832,8 @@ class CephIbmCloud:
         expected = []
         for machine in self.cluster.get("nodes", []):
             prefix = machine["prefix"]
-            group = machine["group"]
+            # Use _primary_group to handle both 'group' and 'groups'
+            group = self._primary_group(machine)
             count = int(machine["count"])
             for i in range(count):
                 expected.append(
