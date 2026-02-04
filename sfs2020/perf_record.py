@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+#
+# /sfs2020/perf_record.py --loadpoint 1 --server test --executable ceph-mds --duration 5 --flamegraph-path /sfs2020/FlameGraph
+#
+# perf record -o /sfs2020/test_lp01_mds.perf_test_fs_perf.data -p 2 -F 99 -g --call-graph dwarf,128 -- sleep 5
+# perf report -i /sfs2020/test_lp01_mds.perf_test_fs_perf.data > /sfs2020/test_lp01_mds.perf_test_fs_perf_report.txt
+#
 import subprocess
 import argparse
 import sys
@@ -89,6 +95,7 @@ def _podman_error_needs_sudo(stderr_bytes: bytes) -> bool:
     )
 
 def _run_container_cmd(runtime, cmd_args):
+    print(f"Running in container {[runtime] + cmd_args}")
     proc = subprocess.run(
         [runtime] + cmd_args,
         stdout=subprocess.PIPE,
@@ -98,6 +105,7 @@ def _run_container_cmd(runtime, cmd_args):
     if runtime == "podman" and proc.returncode != 0 and _podman_error_needs_sudo(proc.stderr):
         sudo = shutil.which("sudo")
         if sudo:
+            print(f"Retrying in container {[sudo, '-n', runtime] + cmd_args}")
             return subprocess.run(
                 [sudo, "-n", runtime] + cmd_args,
                 stdout=subprocess.PIPE,
@@ -162,11 +170,32 @@ def _generate_flamegraph(script_file, flamegraph_dir):
 
     print(f"Generated flamegraph {svg_file}")
 
-def run_reports(perf_data_file, report_file, script_file, pid, server, service_id, flamegraph_dir):
+def _is_running_in_container():
+    """
+    Checks if the current process is running inside a container.
+    """
+    if os.path.exists('/.dockerenv'):
+        return True
+    
+    try:
+        with open('/proc/1/cgroup', 'rt') as f:
+            content = f.read()
+            if 'docker' in content or 'libpod' in content or 'kubepods' in content:
+                return True
+    except Exception:
+        pass
+        
+    return False
+
+def run_reports(perf_data_file, report_file, script_file, pid, server, service_id, flamegraph_dir, in_container_override=False):
     print(f"Generating perf report and script for PID {pid} on {server}...")
 
-    runtime, container_id = _detect_container_for_pid(str(pid))
-    in_container = bool(runtime and container_id)
+    if in_container_override:
+        runtime, container_id = None, None
+        in_container = False
+    else:
+        runtime, container_id = _detect_container_for_pid(str(pid))
+        in_container = bool(runtime and container_id)
 
     try:
         if not in_container:
@@ -193,7 +222,92 @@ def run_reports(perf_data_file, report_file, script_file, pid, server, service_i
                 _generate_flamegraph(script_file, flamegraph_dir)
             return
 
-        # Container path + filenames
+        # Check if /sfs2020/perf_record.py exists in the container
+        print(f"Checking for /sfs2020/perf_record.py in container {container_id}...")
+        check_proc = _container_exec(runtime, container_id, ["test", "-f", "/sfs2020/perf_record.py"])
+        
+        if check_proc.returncode == 0:
+            print(f"Executing perf_record.py inside container {container_id} for reporting...")
+            
+            # Use relative paths for files inside the container's /sfs2020 (if that's where we want them)
+            # Actually, we can just use the same filenames in /tmp or /sfs2020
+            # Let's use /sfs2020 if it exists, otherwise /tmp
+            container_workdir = "/sfs2020"
+            
+            base_perf = os.path.basename(perf_data_file)
+            base_report = os.path.basename(report_file)
+            base_script = os.path.basename(script_file)
+            
+            perf_in = f"{container_workdir}/{base_perf}"
+            report_in = f"{container_workdir}/{base_report}"
+            script_in = f"{container_workdir}/{base_script}"
+
+            # Check if perf_data_file exists on host. 
+            # If we ran 'perf record' in container, it's ALREADY in the container.
+            if not os.path.exists(perf_data_file):
+                print(f"Perf data {perf_data_file} not found on host. Checking if it's already in container...")
+                # Check if it exists in container at the expected path (usually current dir in container)
+                # When we ran 'perf record -o perf_data_file', it used the same name.
+                check_in_container = _container_exec(runtime, container_id, ["test", "-f", base_perf])
+                if check_in_container.returncode == 0:
+                    print(f"Found {base_perf} in container. Moving to {perf_in} if needed...")
+                    if base_perf != perf_in and perf_in != f"./{base_perf}":
+                         _container_exec(runtime, container_id, ["mv", base_perf, perf_in])
+                else:
+                    # Maybe it was already at perf_in?
+                    check_at_perf_in = _container_exec(runtime, container_id, ["test", "-f", perf_in])
+                    if check_at_perf_in.returncode != 0:
+                        print(f"Error: {base_perf} not found on host OR in container {container_id}")
+                        return
+            else:
+                # Copy perf.data into container if it exists on host
+                cp_in = _container_cp_to_container(runtime, container_id, perf_data_file, perf_in)
+                if cp_in.returncode != 0:
+                    # Try /tmp if /sfs2020 fails
+                    container_workdir = "/tmp"
+                    perf_in = f"{container_workdir}/{base_perf}"
+                    report_in = f"{container_workdir}/{base_report}"
+                    script_in = f"{container_workdir}/{base_script}"
+                    cp_in = _container_cp_to_container(runtime, container_id, perf_data_file, perf_in)
+                    if cp_in.returncode != 0:
+                        print(f"Error copying perf data into container for PID {pid} on {server}: {cp_in.stderr.decode('utf-8', errors='replace')}")
+                        return
+
+            # Execute itself in container to generate reports
+            cmd = [
+                "python3", "/sfs2020/perf_record.py",
+                "--loadpoint", "99", # dummy as we don't really use it for reporting only
+                "--server", server,
+                "--only-report", 
+                "--perf-data", perf_in,
+                "--report-file", report_in,
+                "--script-file", script_in
+            ]
+            if flamegraph_dir:
+                cmd += ["--flamegraph-path", "/sfs2020/FlameGraph"]
+            
+            exec_proc = _container_exec(runtime, container_id, cmd)
+            if exec_proc.returncode != 0:
+                print(f"Error executing perf_record.py inside container: {exec_proc.stderr.decode('utf-8', errors='replace')}")
+            else:
+                # Copy results back
+                _container_cp_from_container(runtime, container_id, report_in, report_file)
+                _container_cp_from_container(runtime, container_id, script_in, script_file)
+                
+                # If flamegraph was generated in container, copy it too
+                svg_in = script_in.replace(".txt", ".svg")
+                svg_file = script_file.replace(".txt", ".svg")
+                _container_cp_from_container(runtime, container_id, svg_in, svg_file)
+                
+                # ALSO copy the perf.data file back to the host if it wasn't there
+                if not os.path.exists(perf_data_file):
+                    _container_cp_from_container(runtime, container_id, perf_in, perf_data_file)
+
+                # Cleanup
+                _container_exec(runtime, container_id, ["rm", "-f", perf_in, report_in, script_in, svg_in])
+                return
+
+        # Fallback to existing logic if /sfs2020/perf_record.py missing or exec failed
         base_perf = os.path.basename(perf_data_file)
         base_report = os.path.basename(report_file)
         base_script = os.path.basename(script_file)
@@ -204,11 +318,21 @@ def run_reports(perf_data_file, report_file, script_file, pid, server, service_i
 
         print(f"Detected containerized PID {pid}. Running perf report/script inside container {container_id} using {runtime}...")
 
-        # Copy perf.data into container
-        cp_in = _container_cp_to_container(runtime, container_id, perf_data_file, perf_in)
-        if cp_in.returncode != 0:
-            print(f"Error copying perf data into container for PID {pid} on {server}: {cp_in.stderr.decode('utf-8', errors='replace')}")
-            return
+        # Copy perf.data into container if it exists on host
+        if os.path.exists(perf_data_file):
+            cp_in = _container_cp_to_container(runtime, container_id, perf_data_file, perf_in)
+            if cp_in.returncode != 0:
+                print(f"Error copying perf data into container for PID {pid} on {server}: {cp_in.stderr.decode('utf-8', errors='replace')}")
+                return
+        else:
+             # Check if it exists in container at the expected path (usually current dir in container)
+            check_in_container = _container_exec(runtime, container_id, ["test", "-f", base_perf])
+            if check_in_container.returncode == 0:
+                print(f"Found {base_perf} in container. Moving to {perf_in}...")
+                _container_exec(runtime, container_id, ["mv", base_perf, perf_in])
+            else:
+                print(f"Error: {base_perf} not found on host OR in container {container_id}")
+                return
 
         # Run perf report inside container and write to container filesystem
         print(f"Generating report in container to {report_in}...")
@@ -260,6 +384,10 @@ def main():
     parser.add_argument('--executable', default='ceph-mds', help='Executable name to capture (default: ceph-mds)')
     parser.add_argument('--duration', default='5', help='Capture duration in seconds (default: 5)')
     parser.add_argument('--flamegraph-path', default='', help='Path to FlameGraph project (used if /sfs2020/FlameGraph is missing)')
+    parser.add_argument('--only-report', action='store_true', help='Only generate report from existing perf data')
+    parser.add_argument('--perf-data', help='Path to perf.data for --only-report')
+    parser.add_argument('--report-file', help='Path to report.txt for --only-report')
+    parser.add_argument('--script-file', help='Path to script.txt for --only-report')
 
     args = parser.parse_args()
 
@@ -268,6 +396,24 @@ def main():
     duration = args.duration
     s_name = args.server.split('@')[-1]
     flamegraph_dir = _resolve_flamegraph_dir(args.flamegraph_path)
+
+    if args.only_report:
+        if not (args.perf_data and args.report_file and args.script_file):
+            print("Error: --only-report requires --perf-data, --report-file, and --script-file")
+            sys.exit(1)
+        
+        # We need to provide dummy pid and service_id for run_reports
+        # But wait, run_reports also detects container. If we are ALREADY in container, 
+        # _detect_container_for_pid(dummy_pid) will likely return (None, None) 
+        # because /proc/pid/cgroup won't show the same thing as on host.
+        # So we need to make sure run_reports handles being in container.
+        
+        # Actually, if we are in container, we want run_reports to just run the "not in_container" logic.
+        run_reports(args.perf_data, args.report_file, args.script_file, "0", args.server, "only-report", flamegraph_dir, in_container_override=True)
+        return
+
+    # Check if we are in container. If so, we should do record | report | script locally.
+    in_container = _is_running_in_container()
     
     # Check if executable is running
     pgrep_cmd = ["pgrep", "-f", executable]
@@ -313,10 +459,55 @@ def main():
         print(f"Starting perf record on {args.server} for PID {pid} ({service_id}) for Load Point {loadpoint}...")
         
         # perf record
+        # If the target process is in a container, we must execute 'perf record'
+        # inside that container to correctly capture the symbols and map files.
+        runtime, container_id = _detect_container_for_pid(str(pid))
+        
         perf_record_cmd = [
             "perf", "record", "-o", perf_data_file, "-p", pid, "-F", "99", "-g", 
             "--call-graph", "dwarf,128", "--", "sleep", duration
         ]
+
+        if runtime and container_id:
+            print(f"Detected containerized PID {pid}. Wrapping perf record in {runtime} exec {container_id}...")
+            # When executing in container, we need to know the PID INSIDE the container.
+            # However, 'perf' on the host can often see container PIDs if namespaces are set up correctly.
+            # BUT the requirement says: 'perf_record_cmd should execute within the container'.
+            # To execute WITHIN the container, we need the PID as seen by the container.
+            
+            target_pid = pid
+            # Try to find the PID inside the container
+            # pgrep -f executable
+            find_pid_cmd = ["pgrep", "-f", executable]
+            find_proc = _container_exec(runtime, container_id, find_pid_cmd)
+            if find_proc.returncode == 0:
+                inner_pids = [p.strip() for p in find_proc.stdout.decode('utf-8').strip().split('\n') if p.strip()]
+                if inner_pids:
+                    # If we found multiple, try to find one that matches the service_id or at least the cmdline
+                    # For now, if only one exists, use it.
+                    if len(inner_pids) == 1:
+                        target_pid = inner_pids[0]
+                    else:
+                        # Multiple pids inside container. We are currently in a loop for a specific host PID.
+                        # We can look into /proc/PID/status inside the container to find NSpid (Namespace PID).
+                        # Cat /proc/<pid>/status | grep NSpid
+                        # But wait, we have the host PID. On modern kernels, /proc/<host_pid>/status 
+                        # on the host contains NSpid: <host_pid> <container_pid>
+                        try:
+                            with open(f"/proc/{pid}/status", "r") as f:
+                                for line in f:
+                                    if line.startswith("NSpid:"):
+                                        nspids = line.split()[1:]
+                                        if len(nspids) > 1:
+                                            target_pid = nspids[-1] # The last one is the most nested namespace PID
+                                            break
+                        except Exception as e:
+                            print(f"Could not read NSpid for PID {pid} from host: {e}")
+            
+            perf_record_cmd = [runtime, "exec", container_id] + [
+                "perf", "record", "-o", perf_data_file, "-p", target_pid, "-F", "99", "-g", 
+                "--call-graph", "dwarf,128", "--", "sleep", duration
+            ]
         
         print(f"Executing perf record command: {' '.join(perf_record_cmd)}")
         p = subprocess.Popen(perf_record_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
@@ -334,7 +525,10 @@ def main():
 
     # Run perf reports serially
     for perf_data_file, report_file, script_file, pid, service_id in report_data:
-        run_reports(perf_data_file, report_file, script_file, pid, args.server, service_id, flamegraph_dir)
+        # If we are already in container, we want run_reports to treat it as "not in container" 
+        # so it doesn't try to exec into itself recursively.
+        # Consolidated run: record and report in one go to avoid host-to-container copies.
+        run_reports(perf_data_file, report_file, script_file, pid, args.server, service_id, flamegraph_dir, in_container_override=in_container)
 
     print(f"Finished all perf records and reports on {args.server} for Load Point {loadpoint}.")
 

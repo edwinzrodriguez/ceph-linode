@@ -188,9 +188,15 @@ class CephFSPerfTest:
         
         # Select hosts with rotation from mdss group
         selected_hosts = []
+        has_sfs2020 = False
         for i in range(num_hosts):
             host_name = self.mdss[(start_index + i) % num_mdss]
             selected_hosts.append(host_name)
+            
+            # Check if /sfs2020 exists on the host to add bind mount
+            check = self.run_remote(host_name, "test -d /sfs2020 && echo EXISTS || echo MISSING").strip()
+            if check == "EXISTS":
+                has_sfs2020 = True
             
         mds_spec = {
             'service_type': 'mds',
@@ -199,6 +205,12 @@ class CephFSPerfTest:
                 'hosts': selected_hosts
             }
         }
+
+        if has_sfs2020:
+            # To allow perf inside the container, we need extra privileges.
+            # Cephadm doesn't support 'privileged: true' as a top-level ServiceSpec field,
+            # so we pass it via extra_container_args.
+            mds_spec['extra_container_args'] = ["-v", "/sfs2020:/sfs2020", "--privileged"]
         
         local_mds_yaml = "mds.yaml" # Assuming we write it locally first
         with open(local_mds_yaml, 'w') as f:
