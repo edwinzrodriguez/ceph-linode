@@ -114,6 +114,8 @@ class CephFSPerfTest:
         for client in self.clients:
             # Find all ceph mounts and unmount them
             self.run_remote(client, "sudo umount -a -t ceph || true")
+            # Cleanup mount points
+            self.run_remote(client, "sudo rm -rf /mnt/cephfs_*")
 
     def rebuild_filesystem(self, current_settings):
         # Enable pool deletion once
@@ -240,25 +242,36 @@ class CephFSPerfTest:
             mon_addrs = mon_addrs[3:]
         secret_key = self.run_remote(self.admin, "sudo ceph auth get-key client.0").strip()
         
+        mounts_per_fs = self.config['specstorage'].get('mounts_per_fs', 1)
+        
         for fs in self.fs_names:
             for client_name in self.clients:
-                mount_path = f"/mnt/cephfs_{fs}"
-                self.run_remote(client_name, f"sudo mkdir -p {mount_path}")
-                mount_cmd = f"sudo mount -t ceph {mon_addrs}:/ {mount_path} -o name=0,secret={secret_key},fs={fs}"
-                self.run_remote(client_name, mount_cmd)
-                user, _, _ = self.get_ssh_details(client_name)
-                self.run_remote(client_name, f"sudo chown {user}:{user} {mount_path}")
+                for mnt_idx in range(mounts_per_fs):
+                    mount_path = f"/mnt/cephfs_{fs}"
+                    if mounts_per_fs > 1:
+                        mount_path += f"_{mnt_idx:02d}"
+                    
+                    self.run_remote(client_name, f"sudo mkdir -p {mount_path}")
+                    mount_cmd = f"sudo mount -t ceph {mon_addrs}:/ {mount_path} -o name=0,secret={secret_key},fs={fs}"
+                    self.run_remote(client_name, mount_cmd)
+                    user, _, _ = self.get_ssh_details(client_name)
+                    self.run_remote(client_name, f"sudo chown {user}:{user} {mount_path}")
 
     def prepare_specstorage(self):
         print("Generating SPECSTORAGE 2020 config...")
         proto_path = self.config['specstorage']['prototype']
         output_path = self.config['specstorage']['output_path']
+        mounts_per_fs = self.config['specstorage'].get('mounts_per_fs', 1)
         
         client_mountpoints = []
-        for client_name in self.clients:
-            for fs in self.fs_names:
-                mount_path = f"/mnt/cephfs_{fs}"
-                client_mountpoints.append(f"{client_name}:{mount_path}")
+        # Ordered by across clients first: client1:mnt1, client2:mnt1, client3:mnt1, client1:mnt2...
+        for fs in self.fs_names:
+            for mnt_idx in range(mounts_per_fs):
+                for client_name in self.clients:
+                    mount_path = f"/mnt/cephfs_{fs}"
+                    if mounts_per_fs > 1:
+                        mount_path += f"_{mnt_idx:02d}"
+                    client_mountpoints.append(f"{client_name}:{mount_path}")
         
         mountpoints_str = " ".join(client_mountpoints)
         
