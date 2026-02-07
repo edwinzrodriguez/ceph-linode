@@ -37,7 +37,10 @@ class CephFSPerfTest:
         
         self.fs_name = self.config['fs_name']
         self.num_filesystems = self.config.get('num_filesystems', 1)
-        self.fs_names = [f"{self.fs_name}{i:02d}" for i in range(1, self.num_filesystems + 1)] if self.num_filesystems > 1 else [self.fs_name]
+        if self.num_filesystems > 1:
+            self.fs_names = [self.fs_name] + [f"{self.fs_name}_{i:02d}" for i in range(2, self.num_filesystems + 1)]
+        else:
+            self.fs_names = [self.fs_name]
 
     def parse_inventory(self, path):
         inventory = {}
@@ -125,6 +128,9 @@ class CephFSPerfTest:
 
         for fs in self.fs_names:
             print(f"Deleting and recreating filesystem: {fs}")
+            # Remove MDS service via orchestrator
+            self.run_remote(self.admin, f"sudo ceph orch rm mds.{fs} || true")
+            
             # Delete existing FS
             self.run_remote(self.admin, f"sudo ceph fs fail {fs} --yes-i-really-mean-it || true")
             self.run_remote(self.admin, f"sudo ceph fs rm {fs} --yes-i-really-mean-it || true")
