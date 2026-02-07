@@ -12,8 +12,6 @@
 # You should have received a copy of the GNU General Public License along with
 # this program.  If not, see <https://www.gnu.org/licenses/>.---
 
-- name: import configurations
-  import_playbook: settings.yml
 
 - name: preconfigure linodes
   import_playbook: pre-config.yml
@@ -21,104 +19,121 @@
 - hosts: mons mgrs osds mdss grafana-servers clients
   become: yes
   tasks:
-  - name: setup mon-000 ssh key
-    delegate_to: mon-000
+  - name: setup bootstrap monitor ssh key
+    delegate_to: "{{ groups['mons'][0] }}"
     run_once: true
     community.crypto.openssh_keypair:
-      path: /root/.ssh/id_ed25519
+      path: "{{ ssh_user_home }}/.ssh/id_ed25519"
       type: ed25519
-      comment: mon-000
+      comment: "{{ groups['mons'][0] }}"
     register: cephadm_key
 
   - name: register cephadm.id-ed25519 with hosts
     lineinfile:
-      path: /root/.ssh/authorized_keys
+      path: "{{ ssh_user_home }}/.ssh/authorized_keys"
+      line: "{{ cephadm_key.public_key }}"
+
+  - name: register cephadm.id-ed25519 with root user
+    lineinfile:
+      path: "/root/.ssh/authorized_keys"
       line: "{{ cephadm_key.public_key }}"
 
 - hosts: mons
   become: yes
   tasks:
-  - name: read cephadm private key from mon-000
+  - name: read cephadm private key from bootstrap monitor
     slurp:
-      src: /root/.ssh/id_ed25519
-    delegate_to: mon-000
+      src: "{{ ssh_user_home }}/.ssh/id_ed25519"
+    delegate_to: "{{ groups['mons'][0] }}"
     run_once: true
     register: cephadm_priv_key_b64
 
-  - name: read cephadm public key from mon-000
+  - name: read cephadm public key from bootstrap monitor
     slurp:
-      src: /root/.ssh/id_ed25519.pub
-    delegate_to: mon-000
+      src: "{{ ssh_user_home }}/.ssh/id_ed25519.pub"
+    delegate_to: "{{ groups['mons'][0] }}"
     run_once: true
     register: cephadm_pub_key_b64
 
   - name: distribute cephadm private key to mons
     copy:
-      dest: /root/.ssh/id_ed25519
+      dest: "{{ ssh_user_home }}/.ssh/id_ed25519"
       content: "{{ cephadm_priv_key_b64.content | b64decode }}"
       owner: root
       group: root
       mode: '0600'
-    when: inventory_hostname != 'mon-000'
+    when: inventory_hostname != groups['mons'][0]
 
   - name: distribute cephadm public key to mons
     copy:
-      dest: /root/.ssh/id_ed25519.pub
+      dest: "{{ ssh_user_home }}/.ssh/id_ed25519.pub"
       content: "{{ cephadm_pub_key_b64.content | b64decode }}"
       owner: root
       group: root
       mode: '0644'
-    when: inventory_hostname != 'mon-000'
+    when: inventory_hostname != groups['mons'][0]
 
-  - name: gather host keys from all nodes
-    shell: "ssh-keyscan -H {{ hostvars[item].ansible_ssh_host }} {{ item }}"
+  - name: gather host keys by IP
+    shell: "ssh-keyscan -T 5 -H -t rsa,ecdsa,ed25519 {{ hostvars[item].ansible_ssh_host | default(item) }} 2>/dev/null || true"
     loop: "{{ groups['mons'] + groups['mgrs'] + groups['osds'] + groups['mdss'] + groups['clients'] | unique }}"
-    register: host_keys
+    register: scan_ip
     changed_when: false
+    failed_when: false
+
+  - name: gather host keys by hostname
+    shell: "ssh-keyscan -T 5 -H -t rsa,ecdsa,ed25519 {{ item }} 2>/dev/null || true"
+    loop: "{{ groups['mons'] + groups['mgrs'] + groups['osds'] + groups['mdss'] + groups['clients'] | unique }}"
+    register: scan_host
+    changed_when: false
+    failed_when: false
+
+  - name: combine scanned host key lines
+    set_fact:
+      combined_known_host_lines: >-
+        {{
+          (
+            ((scan_ip.results | map(attribute='stdout') | list | join('\n'))
+             + '\n' +
+             (scan_host.results | map(attribute='stdout') | list | join('\n')))
+            .split('\n')
+            | reject('match', '^#')
+            | reject('equalto', '')
+            | list
+            | unique
+          )
+        }}
 
   - name: update known_hosts on mons
     known_hosts:
-      name: "{{ item.item }}"
-      key: "{{ item.stdout }}"
-      path: /root/.ssh/known_hosts
+      name: "{{ item.split()[0] }}"
+      key: "{{ item }}"
+      path: "{{ ssh_user_home }}/.ssh/known_hosts"
       state: present
-    loop: "{{ host_keys.results }}"
-    when: item.stdout is defined and item.stdout != ""
+    loop: "{{ combined_known_host_lines }}"
 
-- hosts: mons mgrs osds mdss clients
+# - hosts: mons mgrs osds mdss clients
+#   become: yes
+#   tasks:
+#   - name: install cephadm
+#     yum:
+#       name: cephadm,ceph-common
+#       state: latest
+# 
+#   - name: "add {{ RELEASE }} repos"
+#     shell: "cephadm add-repo {{ CEPHADM_REPO }}"
+# 
+#   - name: "install {{ RELEASE }}"
+#     shell: "cephadm install ceph-common"
+
+- hosts: mons
   become: yes
   tasks:
-  - name: fetch cephadm
-    become: no
-    delegate_to: localhost
-    run_once: true
-    ansible.builtin.get_url:
-      url: "https://download.ceph.com/rpm-{{ RELEASE }}/el9/noarch/cephadm"
-      dest: "/tmp/cephadm-{{ RELEASE }}"
-      mode: "0755"
-      force: yes
-
-  - name: distribute cephadm
-    copy:
-      dest: /root/cephadm
-      group: root
-      mode: 0755
-      owner: root
-      src: "/tmp/cephadm-{{ RELEASE }}"
-      remote_src: false
-
-  - name: "add {{ RELEASE }} repos"
-    shell: "/root/cephadm add-repo {{ CEPHADM_REPO }}"
-
-  - name: "install {{ RELEASE }}"
-    shell: "/root/cephadm install ceph-common"
-
-- hosts: mon-000
-  become: yes
-  tasks:
+  - name: limit to first mon host
+    when: inventory_hostname != groups['mons'][0]
+    meta: end_host
   - name: reset cluster.spec (avoid mixed/invalid YAML from previous runs)
     file:
-      path: /root/cluster.spec
+      path: "{{ ssh_user_home }}/cluster.spec"
       state: absent
 
   - name: read cluster.json (base)
@@ -144,19 +159,26 @@
   - name: read cluster.json (for per-host OSD devices)
     set_fact:
       osd_devices_by_host: "{{ (osd_node_cfg | default({}, true)).get('osd_devices_by_host', {}) }}"
+
+  - name: set osd_hosts fact
+    set_fact:
       osd_hosts: >-
         {%- set out = [] -%}
-        {%- for node in cluster_cfg.nodes -%}
-          {%- set gs = node.get('groups', []) -%}
-          {%- if (gs | length) == 0 and (node.get('group') is not none) -%}
-            {%- set gs = [node.get('group')] -%}
-          {%- endif -%}
-          {%- if 'osds' in gs -%}
-            {%- for i in range((node.get('count') | int)) -%}
-              {%- set _ = out.append('%s-%03d' % (node.get('prefix'), i)) -%}
-            {%- endfor -%}
-          {%- endif -%}
-        {%- endfor -%}
+        {%- if osd_devices_by_host | length > 0 -%}
+          {%- set out = osd_devices_by_host.keys() | list -%}
+        {%- else -%}
+          {%- for node in cluster_cfg.nodes -%}
+            {%- set gs = node.get('groups', []) -%}
+            {%- if (gs | length) == 0 and (node.get('group') is not none) -%}
+              {%- set gs = [node.get('group')] -%}
+            {%- endif -%}
+            {%- if 'osds' in gs -%}
+              {%- for i in range((node.get('count') | int)) -%}
+                {%- set _ = out.append('%s-%03d' % (node.get('prefix'), i)) -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
         {{ out }}
 
   - name: validate every OSD host has a device list in cluster.json
@@ -170,33 +192,26 @@
 
   - name: write cephadm spec (single clean YAML stream)
     copy:
-      dest: /root/cluster.spec
+      dest: "{{ ssh_user_home }}/cluster.spec"
       owner: root
       group: root
       mode: "0644"
       content: |
-        {# Build host_list and labels_by_host from cluster.json nodes[] #}
+        {# Build host_list and labels_by_host from inventory groups #}
         {% set host_list = [] %}
         {% set labels_by_host = {} %}
 
-        {% for node in cluster_cfg.nodes %}
-        {%   set gs = node.get('groups', []) %}
-        {%   if (gs | length) == 0 and (node.get('group') is not none) %}
-        {%     set gs = [node.get('group')] %}
-        {%   endif %}
-        {%   for i in range((node.get('count') | int)) %}
-        {%     set h = '%s-%03d' % (node.get('prefix'), i) %}
+        {% for g in ['mons', 'osds', 'mdss', 'mgrs', 'clients'] %}
+        {%   for h in groups.get(g, []) %}
         {%     if h not in host_list %}
         {%       set _ = host_list.append(h) %}
         {%     endif %}
         {%     if h not in labels_by_host %}
         {%       set _ = labels_by_host.update({h: []}) %}
         {%     endif %}
-        {%     for g in gs %}
-        {%       if g and g not in labels_by_host[h] %}
-        {%         set _ = labels_by_host[h].append(g) %}
-        {%       endif %}
-        {%     endfor %}
+        {%     if g not in labels_by_host[h] %}
+        {%       set _ = labels_by_host[h].append(g) %}
+        {%     endif %}
         {%   endfor %}
         {% endfor %}
 
@@ -242,45 +257,45 @@
         {% endfor %}
 
 
-  - name: check ceph already bootstrapped
-    stat:
-      path: /etc/ceph/ceph.conf
-    register: ceph_installed
-
-  - name: "cephadm bootstrap"
-    shell: "/root/cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key /root/.ssh/id_ed25519 --ssh-public-key /root/.ssh/id_ed25519.pub --apply-spec /root/cluster.spec"
-    when: not ceph_installed.stat.exists
-
-  - name: config public network
-    shell: ceph config set global public_network 10.251.0.0/16
-
-  - name: config cluster_network
-    shell: ceph config set global cluster_network 10.251.0.0/16
-
-  - name: log to files
-    shell: ceph config set global log_to_file true
-
-  - name: log cluster to file
-    shell: ceph config set global mon_cluster_log_to_file true
-
-  - name: disable stderr logging
-    shell: ceph config set global log_to_stderr false
-
-  - name: disable stderr logging of cluster log
-    shell: ceph config set global mon_cluster_log_to_stderr false
+#  - name: check ceph already bootstrapped
+#    stat:
+#      path: /etc/ceph/ceph.conf
+#    register: ceph_installed
+#
+#  - name: "cephadm bootstrap"
+#    shell: "sudo cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key {{ ssh_user_home }}/.ssh/id_ed25519 --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub --apply-spec {{ ssh_user_home }}/cluster.spec"
+#    when: not ceph_installed.stat.exists
+#
+#  - name: config public network
+#    shell: ceph config set global public_network 9.11.120.0/23
+#
+#  - name: config cluster_network
+#    shell: ceph config set global cluster_network 9.11.120.0/23
+#
+#  - name: log to files
+#    shell: ceph config set global log_to_file true
+#
+#  - name: log cluster to file
+#    shell: ceph config set global mon_cluster_log_to_file true
+#
+#  - name: disable stderr logging
+#    shell: ceph config set global log_to_stderr false
+#
+#  - name: disable stderr logging of cluster log
+#    shell: ceph config set global mon_cluster_log_to_stderr false
 
 - hosts: clients
   become: yes
   tasks:
-  - name: "add {{ RELEASE }} repos"
-    shell: "/root/cephadm add-repo {{ CEPHADM_REPO }}"
-
-  - name: "install {{ RELEASE }}"
-    shell: "/root/cephadm install ceph-common ceph-fuse"
+#  - name: "add {{ RELEASE }} repos"
+#    shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
+#
+#  - name: "install {{ RELEASE }}"
+#    shell: "{{ ssh_user_home }}/cephadm install ceph-common ceph-fuse"
 
   - name: generate min config
     shell: ceph config generate-minimal-conf
-    delegate_to: mon-000
+    delegate_to: "{{ groups['mons'][0] }}"
     register: minimal_config
     run_once: true
 

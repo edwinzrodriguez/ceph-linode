@@ -128,6 +128,14 @@ class CephLinode():
             sys.exit(1)
 
     @property
+    def ssh_user_home(self):
+        return self.cluster.get('ssh_user_home', '/home/perfadmin')
+
+    @property
+    def ssh_user(self):
+        return self.cluster.get('ssh_user', 'root')
+
+    @property
     def ssh_priv_keyfile(self):
         return os.getenv("HOME") + "/.ssh/id_rsa"
 
@@ -363,7 +371,7 @@ class CephLinode():
                             ip = linode.ips.ipv4.private[0].address
                         else:
                             ip = linode.ips.ipv4.public[0].address
-                        f.write(f"\t{linode.label} ansible_ssh_host={ip} ansible_ssh_port=22 ansible_ssh_user='root' ansible_ssh_private_key_file='{self.ssh_priv_keyfile}' ceph_group='{group}'")
+                        f.write(f"\t{linode.label} ansible_ssh_host={ip} ansible_ssh_port=22 ansible_ssh_user='{self.ssh_user}' ansible_ssh_private_key_file='{self.ssh_user_home}/.ssh/id_rsa' ceph_group='{group}'")
                         if group == 'mons':
                             f.write(f" monitor_address={linode.ips.ipv4.private[0].address}")
                         f.write("\n")
@@ -374,8 +382,8 @@ class CephLinode():
                           'ip_public': linode.ips.ipv4.public[0].address,
                           'group': linode.group,
                           'ceph_group': group,
-                          'user': 'root',
-                          'key': self.ssh_priv_keyfile,
+                          'user': self.ssh_user,
+                          'key': self.ssh_user_home + "/.ssh/id_rsa",
                         }
                         linodes.append(l)
 

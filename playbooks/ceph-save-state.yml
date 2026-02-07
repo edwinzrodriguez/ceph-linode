@@ -14,7 +14,7 @@
 
 ---
 
-- hosts: mon-000
+- hosts: "{{ groups['mons'][0] }}"
   become: yes
   tasks:
   - name: save uname

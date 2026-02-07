@@ -20,9 +20,9 @@
         "type": 16384,
         "group": "osds",
         "osd_devices_by_host": {
-          "osd-000": ["/dev/sdb", "/dev/sdc"],
-          "osd-001": ["/dev/sdb"],
-          "osd-002": ["/dev/nvme0n1"]
+          "ceph53": ["/dev/sdb", "/dev/sdc"],
+          "ceph54": ["/dev/sdb"],
+          "ceph59": ["/dev/nvme0n1"]
         }
       },
       {

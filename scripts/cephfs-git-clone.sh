@@ -66,18 +66,19 @@ function do_bootstrap {
   # Setup a legit clone of linus' tree
   D="$1/bootstrap/"
   run mkdir -p "$D"
-  run ans --module-name=copy --args="src=misc/bootstrap-clone-kernel-source.sh dest=/root/ owner=root group=root mode=755" client-000
-  pretest "$D" client-000
-  run ans -m shell -a "/root/bootstrap-clone-kernel-source.sh" client-000
-  posttest "$D" client-000
+  local first_client=$(< linodes jq --raw-output 'map(select(.ceph_group == "clients"))[0].label')
+  run ans --module-name=copy --args="src=misc/bootstrap-clone-kernel-source.sh dest=/root/ owner=root group=root mode=755" "$first_client"
+  pretest "$D" "$first_client"
+  run ans -m shell -a "/root/bootstrap-clone-kernel-source.sh" "$first_client"
+  posttest "$D" "$first_client"
   # Now create 100 other distinct clones of that for future tests
   D="$1/clone/"
-  ans -m shell -a "ceph fs set cephfs max_mds $MAX_MDS" mon-000
+  ans -m shell -a "ceph fs set cephfs max_mds $MAX_MDS" mons
   run ans --module-name=copy --args="src=misc/clone-kernel-sources.sh dest=/root/ owner=root group=root mode=755" clients
   pretest "$D" clients
   run ans -m shell -a "/root/clone-kernel-sources.sh 4 $MAX_MDS" "$(nclients 25)"
   posttest "$D" clients
-  ans -m shell -a "ceph fs set cephfs max_mds 1" mon-000
+  ans -m shell -a "ceph fs set cephfs max_mds 1" mons
 }
 
 function do_test {
@@ -94,7 +95,7 @@ function do_test {
   printf '%s\n' "$instance" > "$D"/instance
   printf '%s\n' "$(date +%Y%m%d-%H:%M)" > "$D"/date
   {
-    ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mon-000
+    ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mons
     run ans --module-name=copy --args="src=misc/test-clone-rm-kernel.sh dest=/root/ owner=root group=root mode=755" clients
     pretest "$D" clients
     run ans -m shell -a "/root/test-clone-rm-kernel.sh --distributed $(( count > NUM_CLIENTS ? count/NUM_CLIENTS : 1 ))" "$(nclients "$count" NUM_CLIENTS)"

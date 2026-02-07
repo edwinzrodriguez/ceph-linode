@@ -58,7 +58,7 @@ class CephFSPerfTest:
                     continue
 
                 if current_section:
-                    # Host line looks like: mon-000 ansible_ssh_host=13.120.88.238 ...
+                    # Host line looks like: ceph53 ansible_ssh_host=13.120.88.238 ...
                     # Or it could be just a hostname
                     parts = line.split()
                     if not parts:

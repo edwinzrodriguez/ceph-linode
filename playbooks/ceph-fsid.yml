@@ -21,7 +21,7 @@
     shell: ceph fsid
     register: _fsid
     run_once: true
-    delegate_to: mon-000
+    delegate_to: "{{ groups['mons'][0] }}"
 
   - name: set ceph fsid fact
     set_fact:

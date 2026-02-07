@@ -210,6 +210,14 @@ class CephIbmCloud:
             sys.exit(1)
 
     @property
+    def ssh_user_home(self):
+        return self.cluster.get("ssh_user_home", "/home/perfadmin")
+
+    @property
+    def ssh_user(self):
+        return self.cluster.get("ssh_user", "root")
+
+    @property
     def ssh_priv_keyfile(self):
         return os.getenv("HOME") + "/.ssh/id_rsa"
 
@@ -715,8 +723,8 @@ class CephIbmCloud:
                         f.write(
                             f"\t{ibmnode.get('name')} "
                             f"ansible_ssh_host={public_ip} ansible_ssh_port=22 "
-                            f"ansible_ssh_user='root' "
-                            f"ansible_ssh_private_key_file='{self.ssh_priv_keyfile}' "
+                            f"ansible_ssh_user='{self.ssh_user}' "
+                            f"ansible_ssh_private_key_file='{self.ssh_user_home}/.ssh/id_rsa' "
                             f"ceph_group='{group}'"
                         )
                         if group == "mons":
@@ -730,8 +738,8 @@ class CephIbmCloud:
                             "ip_public": public_ip,
                             "group": self.group,
                             "ceph_group": group,
-                            "user": "root",
-                            "key": self.ssh_priv_keyfile,
+                            "user": self.ssh_user,
+                            "key": self.ssh_user_home + "/.ssh/id_rsa",
                         }
                         ibm_nodes.append(l)
 

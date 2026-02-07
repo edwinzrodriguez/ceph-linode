@@ -2,11 +2,11 @@
 
 set -e
 
-# client-000 is used to run smallfile master
-#clients=$(< linodes jq --raw-output 'map(select(.label | startswith("client"))) | map(select(.label != "client-000")) | map(.label) | join(",")')
-MAX_MDS=$(< linodes jq --raw-output 'map(select(.label | startswith("mds"))) | length')
+# the first client is used to run smallfile master
+MAX_MDS=$(< linodes jq --raw-output 'map(select(.ceph_group == "mdss")) | length')
 MAX_MDS=$((MAX_MDS-1)) # leave one for standby
-NUM_CLIENTS=$(< linodes jq --raw-output 'map(select(.label | startswith("client"))) | map(select(.label != "client-000")) | length')
+NUM_CLIENTS=$(< linodes jq --raw-output 'map(select(.ceph_group == "clients")) | length')
+FIRST_CLIENT=$(< linodes jq --raw-output 'map(select(.ceph_group == "clients"))[0].label')
 
 common_params="--same-dir N --response-times y --threads 16 --pause 2000 --files 1000 --hash-into-dirs Y --dirs-per-dir 3 --files-per-dir 1000 --file-size 4"
 oplist="create overwrite append read symlink stat mkdir rmdir chmod setxattr getxattr ls-l rename delete-renamed"
@@ -41,24 +41,20 @@ function scp {
 
 function nclients {
   n="$1"
-  for ((i = 1; i <= n; i++)); do
-    if [[ $i > 1 ]]; then
-      printf ,
-    fi
-    printf "client-%03d" "$i"
-  done
+  clients=$(< linodes jq --raw-output 'map(select(.ceph_group == "clients")) | map(.label) | .[:'$n'] | join(",")')
+  echo "$clients"
 }
 
 function smallfile {
   clients="$1"
   shift
-  run ssh client-000 "smallfile/smallfile_cli.py --top /cephfs/ --host-set $clients --output-json /root/smf.json $common_params $*"
+  run ssh "$FIRST_CLIENT" "smallfile/smallfile_cli.py --top /cephfs/ --host-set $clients --output-json /root/smf.json $common_params $*"
 }
 
 function save {
-  run ssh client-000 "cd /cephfs/network_shared/ && tar czf rsptimes.tar.gz rsptimes*csv"
-  run scp client-000:/cephfs/network_shared/rsptimes.tar.gz "$1/smf/"
-  run scp client-000:/root/smf.json "$1/smf/"
+  run ssh "$FIRST_CLIENT" "cd /cephfs/network_shared/ && tar czf rsptimes.tar.gz rsptimes*csv"
+  run scp "$FIRST_CLIENT:/cephfs/network_shared/rsptimes.tar.gz" "$1/smf/"
+  run scp "$FIRST_CLIENT:/root/smf.json" "$1/smf/"
 }
 
 function do_smallfile {
@@ -105,7 +101,7 @@ function main {
         fi
         for ((i = 0; i < 2; i++)); do
           run do_playbook playbooks/cephfs-reset.yml
-          ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mon-000
+          ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mons
           run do_smallfile "$exp" "$i" "$max_mds" "$num_clients" || true
         done
       done

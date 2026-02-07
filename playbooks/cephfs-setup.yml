@@ -16,7 +16,7 @@
 
 - import_playbook: ceph-fsid.yml
 
-- hosts: mon-000
+- hosts: "{{ groups['mons'][0] }}"
   become: yes
   tasks:
   - name: allow pool deletion
@@ -28,20 +28,19 @@
   - name: allow random ephemeral pins
     shell: ceph config set mds mds_export_ephemeral_random true
 
-- hosts: mds-000
+- hosts: "{{ groups['mdss'][0] | default(groups['osds'][0]) }}"
   become: yes
   tasks:
   - name: compute MDS cache memory limit
     # (RAM*1024) / 2.5
     shell: grep MemTotal /proc/meminfo | awk '{ print int(($2 * 1024) / 3) * 2}'
-    delegate_to: mds-000
     run_once: true
     register: mdsmem
 
   - name: set MDS cache size
     shell: ceph config set mds mds_cache_memory_limit "{{ mdsmem.stdout }}"
     run_once: true
-    delegate_to: mon-000
+    delegate_to: "{{ groups['mons'][0] }}"
 
 - hosts: all
   become: yes
@@ -65,7 +64,7 @@
 - import_playbook: kernel-umount.yml
 - import_playbook: cephfs-destroy.yml
 
-- hosts: mon-000
+- hosts: "{{ groups['mons'][0] }}"
   become: yes
   vars:
     dedicated_metadata_osds: osd.0 osd.1 osd.2 osd.3
@@ -134,22 +133,22 @@
       paths: .ssh/
       patterns: "id_rsa.pub"
     register: find_ssh
-    delegate_to: client-000
+    delegate_to: "{{ groups['clients'][0] }}"
     run_once: true
 
   - name: create ssh key
     shell: ssh-keygen -b 4096 -t rsa -f /root/.ssh/id_rsa -q -N ""
     when: find_ssh.matched == 0
-    delegate_to: client-000
+    delegate_to: "{{ groups['clients'][0] }}"
     run_once: true
 
   - name: get public key
     shell: cat .ssh/id_rsa.pub
     register: client000pub
-    delegate_to: client-000
+    delegate_to: "{{ groups['clients'][0] }}"
     run_once: true
 
-  - name: register client-000 public key with other clients
+  - name: register client public key with other clients
     lineinfile:
       path: .ssh/authorized_keys
       line: "{{ client000pub.stdout }}"

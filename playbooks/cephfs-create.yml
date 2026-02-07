@@ -14,7 +14,7 @@
 
 ---
 
-- hosts: mon-000
+- hosts: "{{ groups['mons'][0] }}"
   become: yes
   vars:
     data_min_pgs_per_osd: 128

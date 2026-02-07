@@ -70,7 +70,7 @@ function do_tests {
     printf '%s\n' "$(date +%Y%m%d-%H:%M)" > "$dir"/date
     run do_playbook playbooks/cephfs-pre-test.yml
 
-    run ans -m shell -a "ceph config set mds mds_cache_memory_limit $size" mon-000
+    run ans -m shell -a "ceph config set mds mds_cache_memory_limit $size" mons
 
     run ans -m shell -a 'df -h /cephfs/' clients &> "$dir/${TEST}/pre-df"
     date +%s > "$dir/${TEST}/start"
@@ -98,7 +98,7 @@ function main {
         fi
         for ((i = 0; i < 2; i++)); do
           run do_playbook playbooks/cephfs-reset.yml
-          ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mon-000
+          ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mons
           run do_tests "$exp" "$i" "$max_mds" "$num_clients" || true
         done
       done

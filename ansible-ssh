@@ -21,8 +21,9 @@ function run {
 }
 
 ip=$(< linodes jq -rc ".[] | select(.label | contains(\"$1\")) | .ip_public" | head -n1)
+user=$(< linodes jq -rc ".[] | select(.label | contains(\"$1\")) | .user" | head -n1)
 if [ -n "$ip" ]; then
-    exec ssh -Y -o UserKnownHostsFile=/dev/null -o 'StrictHostKeyChecking=no' -o PreferredAuthentications=publickey "root@$ip" < /dev/tty
+    exec ssh -Y -o UserKnownHostsFile=/dev/null -o 'StrictHostKeyChecking=no' -o PreferredAuthentications=publickey "$user@$ip" < /dev/tty
 else
     echo no host matches >&2
     exit 1

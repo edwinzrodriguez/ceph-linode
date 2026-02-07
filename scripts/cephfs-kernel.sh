@@ -84,7 +84,7 @@ function main {
         fi
         for ((i = 0; i < 2; i++)); do
           run do_playbook playbooks/cephfs-reset.yml
-          ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mon-000
+          ans -m shell -a "ceph fs set cephfs max_mds $max_mds" mons
           run do_tests "$exp" "$i" "$max_mds" "$num_clients" || true
         done
       done
