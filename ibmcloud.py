@@ -595,7 +595,15 @@ class CephIbmCloud:
         except ApiException:
             instance["tags"] = list(tags)
 
-    def _wait_for_instance_status(self, instance_id, status, tries=60, delay=10):
+    def _wait_for_instance_status(self, instance_id, status, tries=None, delay=None):
+        if tries is None:
+            tries = self.cluster.get("wait_status_tries", 60)
+        if delay is None:
+            delay = self.cluster.get("wait_status_delay", 10)
+
+        start_time = time.time()
+        last_update = start_time
+
         for _ in range(tries):
             try:
                 instance = self.client.get_instance(instance_id).get_result()
@@ -608,6 +616,16 @@ class CephIbmCloud:
 
             if instance.get("status") == status:
                 return instance
+
+            now = time.time()
+            if now - last_update >= 60:
+                elapsed = int((now - start_time) / 60)
+                name = instance.get("name") or instance_id
+                logging.info(
+                    f"Waiting for {name} to reach status {status} (elapsed: {elapsed}m)"
+                )
+                last_update = now
+
             time.sleep(delay)
         raise RuntimeError(f"instance {instance_id} did not reach status {status}")
 
@@ -1042,7 +1060,15 @@ class CephIbmCloud:
             instance_id, {"type": action_type}
         ).get_result()
 
-    def _wait_for_instance_status(self, instance_id, status, tries=60, delay=10):
+    def _wait_for_instance_status(self, instance_id, status, tries=None, delay=None):
+        if tries is None:
+            tries = self.cluster.get("wait_status_tries", 60)
+        if delay is None:
+            delay = self.cluster.get("wait_status_delay", 10)
+
+        start_time = time.time()
+        last_update = start_time
+
         for _ in range(tries):
             try:
                 instance = self.client.get_instance(instance_id).get_result()
@@ -1055,6 +1081,16 @@ class CephIbmCloud:
 
             if instance.get("status") == status:
                 return instance
+
+            now = time.time()
+            if now - last_update >= 60:
+                elapsed = int((now - start_time) / 60)
+                name = instance.get("name") or instance_id
+                logging.info(
+                    f"Waiting for {name} to reach status {status} (elapsed: {elapsed}m)"
+                )
+                last_update = now
+
             time.sleep(delay)
         raise RuntimeError(f"instance {instance_id} did not reach status {status}")
 
