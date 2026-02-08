@@ -111,19 +111,33 @@
       state: present
     loop: "{{ combined_known_host_lines }}"
 
-# - hosts: mons mgrs osds mdss clients
-#   become: yes
-#   tasks:
-#   - name: install cephadm
-#     yum:
-#       name: cephadm,ceph-common
-#       state: latest
-# 
-#   - name: "add {{ RELEASE }} repos"
-#     shell: "cephadm add-repo {{ CEPHADM_REPO }}"
-# 
-#   - name: "install {{ RELEASE }}"
-#     shell: "cephadm install ceph-common"
+- hosts: mons mgrs osds mdss clients
+  become: yes
+  tasks:
+  - name: fetch cephadm
+    become: no
+    delegate_to: localhost
+    run_once: true
+    ansible.builtin.get_url:
+      url: "https://download.ceph.com/rpm-{{ RELEASE }}/el9/noarch/cephadm"
+      dest: "/tmp/cephadm-{{ RELEASE }}"
+      mode: "0755"
+      force: yes
+
+  - name: distribute cephadm
+    copy:
+      dest: "{{ ssh_user_home }}/cephadm"
+      group: root
+      mode: 0755
+      owner: root
+      src: "/tmp/cephadm-{{ RELEASE }}"
+      remote_src: false
+
+  - name: "add {{ RELEASE }} repos"
+    shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
+
+  - name: "install {{ RELEASE }}"
+    shell: "{{ ssh_user_home }}/cephadm install ceph-common"
 
 - hosts: mons
   become: yes
@@ -257,41 +271,43 @@
         {% endfor %}
 
 
-#  - name: check ceph already bootstrapped
-#    stat:
-#      path: /etc/ceph/ceph.conf
-#    register: ceph_installed
-#
-#  - name: "cephadm bootstrap"
-#    shell: "sudo cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key {{ ssh_user_home }}/.ssh/id_ed25519 --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub --apply-spec {{ ssh_user_home }}/cluster.spec"
-#    when: not ceph_installed.stat.exists
-#
-#  - name: config public network
-#    shell: ceph config set global public_network 9.11.120.0/23
-#
-#  - name: config cluster_network
-#    shell: ceph config set global cluster_network 9.11.120.0/23
-#
-#  - name: log to files
-#    shell: ceph config set global log_to_file true
-#
-#  - name: log cluster to file
-#    shell: ceph config set global mon_cluster_log_to_file true
-#
-#  - name: disable stderr logging
-#    shell: ceph config set global log_to_stderr false
-#
-#  - name: disable stderr logging of cluster log
-#    shell: ceph config set global mon_cluster_log_to_stderr false
+  - name: check ceph already bootstrapped
+    stat:
+      path: /etc/ceph/ceph.conf
+    register: ceph_installed
+
+  - name: "cephadm bootstrap"
+    shell: "{{ ssh_user_home }}/cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key {{ ssh_user_home }}/.ssh/id_ed25519 --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub --apply-spec {{ ssh_user_home }}/cluster.spec"
+    when: not ceph_installed.stat.exists
+
+  - name: config public network
+    shell: "ceph config set global public_network {{ public_network }}"
+    when: public_network is defined and public_network != "-"
+
+  - name: config cluster_network
+    shell: "ceph config set global cluster_network {{ cluster_network }}"
+    when: cluster_network is defined and cluster_network != "-"
+
+  - name: log to files
+    shell: ceph config set global log_to_file true
+
+  - name: log cluster to file
+    shell: ceph config set global mon_cluster_log_to_file true
+
+  - name: disable stderr logging
+    shell: ceph config set global log_to_stderr false
+
+  - name: disable stderr logging of cluster log
+    shell: ceph config set global mon_cluster_log_to_stderr false
 
 - hosts: clients
   become: yes
   tasks:
-#  - name: "add {{ RELEASE }} repos"
-#    shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
-#
-#  - name: "install {{ RELEASE }}"
-#    shell: "{{ ssh_user_home }}/cephadm install ceph-common ceph-fuse"
+  - name: "add {{ RELEASE }} repos"
+    shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
+
+  - name: "install {{ RELEASE }}"
+    shell: "{{ ssh_user_home }}/cephadm install ceph-common ceph-fuse"
 
   - name: generate min config
     shell: ceph config generate-minimal-conf

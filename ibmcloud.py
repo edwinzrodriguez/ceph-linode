@@ -493,6 +493,7 @@ class CephIbmCloud:
                 existing = inst
                 break
 
+        subnet = self._get_subnet(machine)
         if existing:
             logging.info(f"{label}: already exists as {existing.get('id')}")
             instance = existing
@@ -501,7 +502,6 @@ class CephIbmCloud:
             image = self._get_machine_image(machine)
             zone = self._get_zone(machine)
             vpc = self._get_vpc()
-            subnet = self._get_subnet(machine)
             resource_group_id = self._get_resource_group_id()
 
             instance_prototype = {
@@ -555,6 +555,7 @@ class CephIbmCloud:
             instance = self._wait_for_instance_status(instance.get("id"), "running")
             self._attach_tags(instance, tags)
             self._ensure_floating_ip(instance)
+            instance["_subnet_ipv4_cidr_block"] = subnet.get("ipv4_cidr_block")
             return instance
 
     def _attach_tags(self, instance, tags):
@@ -736,6 +737,23 @@ class CephIbmCloud:
                             name=fip_name,
                         )
                         public_ip = floating_ip.get("address") if floating_ip else private_ip
+                        # The public network CIDR should be from the public IP (floating IP)
+                        # We'll use /32 for individual public IPs if we can't determine the subnet CIDR for it easily
+                        # but often it's requested as a network.
+                        # For now, let's use the public IP with /24 as a common placeholder or /32 if we want to be exact.
+                        # The requirement says "network cidr of ip_public".
+                        # If we have a public IP 13.120.93.243, the /24 network is 13.120.93.0/24.
+                        
+                        def get_network_cidr(ip):
+                            if not ip or ip == "-":
+                                return "-"
+                            parts = ip.split(".")
+                            if len(parts) == 4:
+                                return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+                            return ip
+
+                        public_network_cidr = get_network_cidr(public_ip)
+                        cluster_network_cidr = ibmnode.get("_subnet_ipv4_cidr_block", "-")
 
                         # For backwards compatibility, keep ceph_group as the current INI section name
                         f.write(
@@ -743,7 +761,9 @@ class CephIbmCloud:
                             f"ansible_ssh_host={public_ip} ansible_ssh_port=22 "
                             f"ansible_ssh_user='{self.ssh_user}' "
                             f"ansible_ssh_private_key_file='{self.ssh_user_home}/.ssh/id_rsa' "
-                            f"ceph_group='{group}'"
+                            f"ceph_group='{group}' "
+                            f"public_network='{public_network_cidr}' "
+                            f"cluster_network='{cluster_network_cidr}'"
                         )
                         if group == "mons":
                             f.write(f" monitor_address={private_ip}")
