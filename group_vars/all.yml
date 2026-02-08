@@ -1,5 +1,5 @@
-ssh_user: perfadmin
-ssh_user_home: /home/perfadmin
+ssh_user: root
+ssh_user_home: /root
 # RELEASE must be a tagged version or release branch to pull cephadm from, probably just use the latest release, not main!
 RELEASE: tentacle
 # CEPHADM_REPO is the branch to actually deploy
