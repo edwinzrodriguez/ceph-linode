@@ -27,141 +27,141 @@
 - hosts: all
   become: yes
   tasks:
-   - name: set hostname
-     ansible.builtin.hostname:
-       name: "{{ inventory_hostname }}"
+  - name: set hostname
+    ansible.builtin.hostname:
+      name: "{{ inventory_hostname }}"
 
-   - name: create hosts from inventory
-     become: no
-     shell: ./misc/generate-hosts.py linodes
-     register: etchosts
-     run_once: true
-     delegate_to: localhost
+  - name: create hosts from inventory
+    become: no
+    shell: ./misc/generate-hosts.py linodes
+    register: etchosts
+    run_once: true
+    delegate_to: localhost
 
-   - name: add to /etc/hosts
-     blockinfile:
-       block: "{{ etchosts.stdout }}"
-       path: /etc/hosts
+  - name: add to /etc/hosts
+    blockinfile:
+      block: "{{ etchosts.stdout }}"
+      path: /etc/hosts
 
-   - name: add to /etc/hosts
-     blockinfile:
-       block: "{{ etchosts.stdout }}"
-       path: /etc/hosts
-     ignore_errors: yes
-     run_once: true
-     delegate_to: localhost
+  - name: add to /etc/hosts
+    blockinfile:
+      block: "{{ etchosts.stdout }}"
+      path: /etc/hosts
+    ignore_errors: yes
+    run_once: true
+    delegate_to: localhost
 
-   # coredump capture setup
-   - name: create crash directory
-     file:
-       path: /crash
-       state: directory
-       owner: root
-       group: root
-       mode: 1777
+  # coredump capture setup
+  - name: create crash directory
+    file:
+      path: /crash
+      state: directory
+      owner: root
+      group: root
+      mode: 1777
 
-   - name: set core_pattern
-     sysctl:
-       name: kernel.core_pattern
-       value: /crash/%e-%h-%p-%t.core
+  - name: set core_pattern
+    sysctl:
+      name: kernel.core_pattern
+      value: /crash/%e-%h-%p-%t.core
 
-   - name: add DefaultLimitCORE=infinity
-     lineinfile:
-       path: /etc/systemd/system.conf
-       line: DefaultLimitCORE=infinity
-     register: coreline
+  - name: add DefaultLimitCORE=infinity
+    lineinfile:
+      path: /etc/systemd/system.conf
+      line: DefaultLimitCORE=infinity
+    register: coreline
 
-   - name: reexec systemd
-     shell: systemctl daemon-reexec
-     when: coreline.changed
+  - name: reexec systemd
+    shell: systemctl daemon-reexec
+    when: coreline.changed
 
-   - name: import EPEL GPG key
-     ansible.builtin.rpm_key:
-       state: present
-       key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+  - name: import EPEL GPG key
+    ansible.builtin.rpm_key:
+      state: present
+      key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
 
-   - name: import EPEL-NEXT GPG key (best-effort)
-     ansible.builtin.rpm_key:
-       state: present
-       key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
-     ignore_errors: yes
+  - name: import EPEL-NEXT GPG key (best-effort)
+    ansible.builtin.rpm_key:
+      state: present
+      key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+    ignore_errors: yes
 
-   - name: install epel-release RPMs
-     yum:
-       name:
-         - "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
-         - "https://dl.fedoraproject.org/pub/epel/epel-next-release-latest-9.noarch.rpm"
-       state: present
-       update_cache: yes
+  - name: install epel-release RPMs
+    yum:
+      name:
+        - "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
+        - "https://dl.fedoraproject.org/pub/epel/epel-next-release-latest-9.noarch.rpm"
+      state: present
+      update_cache: yes
 
-   - name: enable epel repo
-     yum_repository:
-       name: epel
-       description: "Extra Packages for Enterprise Linux 9 - $basearch"
-       metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-9&arch=$basearch"
-       enabled: yes
-       gpgcheck: yes
-       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
-       state: present
+  - name: enable epel repo
+    yum_repository:
+      name: epel
+      description: "Extra Packages for Enterprise Linux 9 - $basearch"
+      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-9&arch=$basearch"
+      enabled: yes
+      gpgcheck: yes
+      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+      state: present
 
-   - name: enable epel-next repo (if available)
-     yum_repository:
-       name: epel-next
-       description: "EPEL Next for Enterprise Linux 9 - $basearch"
-       metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-next-9&arch=$basearch"
-       enabled: yes
-       gpgcheck: yes
-       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
-       state: present
-     ignore_errors: yes
+  - name: enable epel-next repo (if available)
+    yum_repository:
+      name: epel-next
+      description: "EPEL Next for Enterprise Linux 9 - $basearch"
+      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-next-9&arch=$basearch"
+      enabled: yes
+      gpgcheck: yes
+      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+      state: present
+    ignore_errors: yes
 
-   - name: update packages
-     yum:
-       name: "*"
-       state: latest
-       update_cache: yes
+  - name: update packages
+    yum:
+      name: "*"
+      state: latest
+      update_cache: yes
 
   # package setup
   # - logrotate needs psmisc for killall
   # - ceph-ansible needs EPEL but also needs ca-certificates installed to avoid some errors, do this now
-   - name: install launcher packages
-     yum:
-       name: logrotate,psmisc,ca-certificates,python3,chrony,podman,lvm2
-       state: latest
+  - name: install launcher packages
+    yum:
+      name: logrotate,psmisc,ca-certificates,python3,chrony,podman,lvm2
+      state: latest
 
-   # log rotation setup
-   - name: copy ceph-logrotate.timer
-     copy: src=ceph-log-rotate.timer dest=/etc/systemd/system/ owner=root group=root mode=644
+  # log rotation setup
+  - name: copy ceph-logrotate.timer
+    copy: src=ceph-log-rotate.timer dest=/etc/systemd/system/ owner=root group=root mode=644
 
-   - name: copy ceph-logrotate.service
-     copy: src=ceph-log-rotate.service dest=/etc/systemd/system/ owner=root group=root mode=644
+  - name: copy ceph-logrotate.service
+    copy: src=ceph-log-rotate.service dest=/etc/systemd/system/ owner=root group=root mode=644
 
-   - name: copy ceph logrotate config
-     copy: src=ceph.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
+  - name: copy ceph logrotate config
+    copy: src=ceph.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
 
  # Ideally we would use the ceph-logrotate.timer but systemd has a bug requiring cron
-   - name: copy crontab
-     copy: src=crontab dest=/root/ owner=root group=root mode=644
-   - name: register crontab
-     shell: crontab crontab
+  - name: copy crontab
+    copy: src=crontab dest=/root/ owner=root group=root mode=644
+  - name: register crontab
+    shell: crontab /root/crontab
 
-   - name: enable ntp
-     systemd:
-       enabled: yes
-       name: chronyd
-       state: started
+  - name: enable ntp
+    systemd:
+      enabled: yes
+      name: chronyd
+      state: started
 
 - hosts: mdss
   become: yes
   tasks:
-   - name: check for mds logrotate config
-     local_action: stat path="ceph-mds.logrotate"
-     register: ceph_mds_logrotate
-     become: false
+  - name: check for mds logrotate config
+    local_action: stat path="ceph-mds.logrotate"
+    register: ceph_mds_logrotate
+    become: false
 
-   - name: copy ceph mds logrotate config
-     copy: src=ceph-mds.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
-     when: ceph_mds_logrotate.stat.exists
+  - name: copy ceph mds logrotate config
+    copy: src=ceph-mds.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
+    when: ceph_mds_logrotate.stat.exists
 
 - hosts: osds
   become: yes
@@ -226,14 +226,14 @@
 - hosts: mons
   become: yes
   tasks:
-   - name: check for mon logrotate config
-     local_action: stat path="ceph-mon.logrotate"
-     register: ceph_mon_logrotate
-     become: false
+  - name: check for mon logrotate config
+    local_action: stat path="ceph-mon.logrotate"
+    register: ceph_mon_logrotate
+    become: false
 
-   - name: copy ceph mon logrotate config
-     copy: src=ceph-mon.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
-     when: ceph_mon_logrotate.stat.exists
+  - name: copy ceph mon logrotate config
+    copy: src=ceph-mon.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
+    when: ceph_mon_logrotate.stat.exists
 
 - hosts: clients
   become: yes
