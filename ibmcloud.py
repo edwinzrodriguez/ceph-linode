@@ -211,7 +211,7 @@ class CephIbmCloud:
 
     @property
     def ssh_user_home(self):
-        return self.cluster.get("ssh_user_home", "/home/perfadmin")
+        return self.cluster.get("ssh_user_home", os.getenv("HOME"))
 
     @property
     def ssh_user(self):
