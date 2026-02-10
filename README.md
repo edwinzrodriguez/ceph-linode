@@ -17,6 +17,23 @@ Linode is a popular virtual private server (VPS) provider, but one of several. T
 Want to add another cloud provider? I'm all-ears. Please talk to me by email
 (see commit history for email address).
 
+## Package Installation
+
+You can install the project as a Python package, which provides several command-line tools:
+
+```bash
+git clone https://github.com/batrick/ceph-linode.git
+cd ceph-linode
+pip3 install .
+```
+
+This installs the following commands:
+* `ceph-linode`: Manage Linode instances (replaces `python3 linode.py`)
+* `ceph-ibmcloud`: Manage IBM Cloud instances (replaces `python3 ibmcloud.py`)
+* `cephfs-perf-test`: Run CephFS performance tests (replaces `python3 sfs2020/cephfs_perf_test.py`)
+* `perf-record`: Record performance data (replaces `python3 sfs2020/perf_record.py`)
+* `run-workload`: Run SPECstorage workloads (replaces `python3 sfs2020/run_workload.py`)
+
 ## Repository Organization
 
 The repository has a number of utilities roughly organized as:
@@ -78,21 +95,21 @@ The repository has a number of utilities roughly organized as:
     dnf install epel-release
     dnf update
     dnf install git ansible python3-pip python3-netaddr jq rsync wget htop
-    pip3 install linode_api4 notario
+    pip3 install .
     ```
 
   **Fedora**:
 
     ```bash
     dnf install git ansible python3-notario python3-pip python3-netaddr jq rsync htop wget
-    pip3 install linode_api4
+    pip3 install .
     ```
 
   **Arch Linux**:
 
     ```bash
     pacman -Syu git ansible python3-netaddr python3-pip jq rsync htop wget
-    pip3 install notario linode_api4
+    pip3 install .
     ```
 
 * Clone ceph-linode:
@@ -116,7 +133,7 @@ The repository has a number of utilities roughly organized as:
 * Start using:
 
     ```bash
-    python3 linode.py launch
+    ceph-linode launch
     source ansible-env.bash
     do_playbook cephadm.yml
     ```
@@ -156,13 +173,13 @@ deleting all configurations, destroying all disks, etc.
 You can manually nuke the cluster if you want using:
 
 ```bash
-python3 linode.py nuke
+ceph-linode nuke
 ```
 
 ## How-to destroy your cluster:
 
 ```bash
-python3 linode.py destroy
+ceph-linode destroy
 ```
 
 The script works by destroying all the Linodes that belong to the group named

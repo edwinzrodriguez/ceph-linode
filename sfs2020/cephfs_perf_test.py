@@ -539,10 +539,13 @@ class CephFSPerfTest:
             
             self.unmount_clients()
 
-if __name__ == "__main__":
+def main():
     if len(sys.argv) < 3:
-        print("Usage: python cephfs_perf_test.py <config.yaml> <ansible_inventory>")
+        print("Usage: cephfs-perf-test <config.yaml> <ansible_inventory>")
         sys.exit(1)
     
     tester = CephFSPerfTest(sys.argv[1], sys.argv[2])
     tester.execute_test_matrix()
+
+if __name__ == "__main__":
+    main()
