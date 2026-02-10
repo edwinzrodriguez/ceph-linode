@@ -310,7 +310,9 @@ class CephFSPerfTest:
         # Generate run_name and results_dir
         mds_part = "_".join([f"{self.snake_to_pascal(k)}-{self.format_si_units(v)}" for k, v in sorted(settings.items()) if k not in ["fs_name", "workload_dir", "num_filesystems"]])
         
-        fs_part = f"{self.fs_name}-x{self.num_filesystems}" if self.num_filesystems > 1 else self.fs_name
+        mounts_per_fs = self.config['specstorage'].get('mounts_per_fs', 1)
+        num_clients = len(self.clients)
+        fs_part = f"{self.fs_name}-x{self.num_filesystems}-c{num_clients}-m{mounts_per_fs}"
 
         if shared_timestamp:
             full_timestamp = shared_timestamp
@@ -320,11 +322,11 @@ class CephFSPerfTest:
             unix_ts = int(now.timestamp())
             full_timestamp = f"{timestamp}-{unix_ts}"
 
-        run_name = f"{fs_part}_{full_timestamp}"
+        run_name = f"{full_timestamp}_{fs_part}"
         payload['run_name'] = run_name
 
         if results_base_dir:
-            dir_name = f"{fs_part}_{mds_part}_{full_timestamp}"
+            dir_name = f"{full_timestamp}_{fs_part}_{mds_part}"
             results_dir = os.path.join(results_base_dir, dir_name)
             payload['results_dir'] = results_dir
 

@@ -56,7 +56,12 @@ def main():
     run_name = settings.get('run_name')
     if not run_name:
         # Construct a string from mds_settings
-        mds_part = "_".join([f"{snake_to_pascal(k)}-{format_si_units(v)}" for k, v in sorted(settings.items()) if k not in ["fs_name", "workload_dir"]])
+        mds_part = "_".join([f"{snake_to_pascal(k)}-{format_si_units(v)}" for k, v in sorted(settings.items()) if k not in ["fs_name", "workload_dir", "num_filesystems"]])
+        
+        num_filesystems = settings.get('num_filesystems', 1)
+        # Note: run_workload.py doesn't have easy access to inventory/config for client counts
+        # It's better if it's passed in 'run_name' or we use placeholders
+        fs_part = f"{fs_name}-x{num_filesystems}"
         
         # Timestamp
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -64,7 +69,7 @@ def main():
         unix_ts = int(now.timestamp())
         full_timestamp = f"{timestamp}-{unix_ts}"
         
-        run_name = f"{fs_name}_{mds_part}_{full_timestamp}"
+        run_name = f"{full_timestamp}_{fs_part}_{mds_part}"
     
     output_path = args.config
     
