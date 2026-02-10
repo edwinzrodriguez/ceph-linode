@@ -76,15 +76,25 @@
     shell: systemctl daemon-reexec
     when: coreline.changed
 
+  - name: download EPEL GPG key
+    get_url:
+      url: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+      dest: "/tmp/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+      mode: '0644'
+
   - name: import EPEL GPG key
-    ansible.builtin.rpm_key:
-      state: present
-      key: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+    shell: "rpm --import /tmp/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+
+  - name: download EPEL-NEXT GPG key (best-effort)
+    get_url:
+      url: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+      dest: "/tmp/RPM-GPG-KEY-EPEL-NEXT-{{ ansible_distribution_major_version }}"
+      mode: '0644'
+    ignore_errors: yes
+    when: ansible_distribution_major_version | int < 10
 
   - name: import EPEL-NEXT GPG key (best-effort)
-    ansible.builtin.rpm_key:
-      state: present
-      key: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+    shell: "rpm --import /tmp/RPM-GPG-KEY-EPEL-NEXT-{{ ansible_distribution_major_version }}"
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
 
@@ -115,6 +125,39 @@
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
       state: present
 
+  - name: Add IBM Storage Ceph repository (RHEL 9/10)
+    ansible.builtin.get_url:
+      url: "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-9-rhel-{{ ansible_distribution_major_version }}.repo"
+      dest: /etc/yum.repos.d/ibm-storage-ceph.repo
+      owner: root
+      group: root
+      mode: '0644'
+    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+
+  - name: Install IBM Storage Ceph license (RHEL 9/10)
+    ansible.builtin.dnf:
+      name: ibm-storage-ceph-license
+      state: present
+    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+
+  - name: Accept IBM license
+    ansible.builtin.file:
+      path: /usr/share/ibm-storage-ceph-license
+      state: directory
+      owner: root
+      group: root
+      mode: '0755'
+    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+
+  - name: Touch IBM license accept file
+    ansible.builtin.file:
+      path: /usr/share/ibm-storage-ceph-license/accept
+      state: touch
+      owner: root
+      group: root
+      mode: '0644'
+    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+
   - name: enable epel-next repo (if available)
     yum_repository:
       name: epel-next
@@ -127,11 +170,11 @@
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
 
-  - name: update packages
-    yum:
-      name: "*"
-      state: latest
-      update_cache: yes
+#  - name: update packages
+#    yum:
+#      name: "*"
+#      state: latest
+#      update_cache: yes
 
   # package setup
   # - logrotate needs psmisc for killall

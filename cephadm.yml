@@ -123,6 +123,7 @@
       dest: "/tmp/cephadm-{{ RELEASE }}"
       mode: "0755"
       force: yes
+    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
 
   - name: distribute cephadm
     copy:
@@ -132,9 +133,25 @@
       owner: root
       src: "/tmp/cephadm-{{ RELEASE }}"
       remote_src: false
+    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
 
   - name: "add {{ RELEASE }} repos"
     shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
+    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
+
+  - name: Install cephadm (RHEL 9/10)
+    ansible.builtin.dnf:
+      name: cephadm
+      state: present
+    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+
+  - name: Symlink cephadm to home (RHEL 9/10)
+    ansible.builtin.file:
+      src: /usr/sbin/cephadm
+      dest: "{{ ssh_user_home }}/cephadm"
+      state: link
+      force: yes
+    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
     shell: "{{ ssh_user_home }}/cephadm install ceph-common"
