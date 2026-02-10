@@ -69,6 +69,7 @@
     lineinfile:
       path: /etc/systemd/system.conf
       line: DefaultLimitCORE=infinity
+      create: yes
     register: coreline
 
   - name: reexec systemd
@@ -78,42 +79,53 @@
   - name: import EPEL GPG key
     ansible.builtin.rpm_key:
       state: present
-      key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+      key: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
 
   - name: import EPEL-NEXT GPG key (best-effort)
     ansible.builtin.rpm_key:
       state: present
-      key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9
+      key: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
     ignore_errors: yes
+    when: ansible_distribution_major_version | int < 10
 
   - name: install epel-release RPMs
     yum:
       name:
-        - "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
-        - "https://dl.fedoraproject.org/pub/epel/epel-next-release-latest-9.noarch.rpm"
+        - "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
+        - "https://dl.fedoraproject.org/pub/epel/epel-next-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
       state: present
       update_cache: yes
+    when: ansible_distribution_major_version | int < 10
+
+  - name: install epel-release RPMs (RHEL 10+)
+    yum:
+      name:
+        - "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
+      state: present
+      update_cache: yes
+    when: ansible_distribution_major_version | int >= 10
 
   - name: enable epel repo
     yum_repository:
       name: epel
-      description: "Extra Packages for Enterprise Linux 9 - $basearch"
-      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-9&arch=$basearch"
+      description: "Extra Packages for Enterprise Linux {{ ansible_distribution_major_version }} - $basearch"
+      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-{{ ansible_distribution_major_version }}&arch=$basearch"
       enabled: yes
       gpgcheck: yes
-      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
       state: present
 
   - name: enable epel-next repo (if available)
     yum_repository:
       name: epel-next
-      description: "EPEL Next for Enterprise Linux 9 - $basearch"
-      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-next-9&arch=$basearch"
+      description: "EPEL Next for Enterprise Linux {{ ansible_distribution_major_version }} - $basearch"
+      metalink: "https://mirrors.fedoraproject.org/metalink?repo=epel-next-{{ ansible_distribution_major_version }}&arch=$basearch"
       enabled: yes
       gpgcheck: yes
-      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-9"
+      gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
       state: present
     ignore_errors: yes
+    when: ansible_distribution_major_version | int < 10
 
   - name: update packages
     yum:
