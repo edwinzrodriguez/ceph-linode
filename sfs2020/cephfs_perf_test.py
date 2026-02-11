@@ -16,6 +16,22 @@ class CephFSPerfTest:
             self.config = yaml.safe_load(f)
         
         self.inventory_path = inventory_path
+        
+        # Load global variables for expansion
+        self.vars = {}
+        # 1. Load from group_vars/all.yml
+        all_vars_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'group_vars', 'all.yml')
+        if os.path.exists(all_vars_path):
+            with open(all_vars_path, 'r') as f:
+                self.vars.update(yaml.safe_load(f) or {})
+        
+        # 2. Load from cluster.json
+        cluster_json_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'cluster.json')
+        if os.path.exists(cluster_json_path):
+            with open(cluster_json_path, 'r') as f:
+                cluster_data = json.load(f)
+                self.vars.update(cluster_data)
+
         self.hosts_meta = self.parse_inventory(inventory_path)
         
         # Determine admin, servers (OSDs/MDSs), and clients from inventory
@@ -42,6 +58,29 @@ class CephFSPerfTest:
         else:
             self.fs_names = [self.fs_name]
 
+    def expand_vars(self, value):
+        if not isinstance(value, str):
+            return value
+        
+        # Regex to find {{ variable }} allowing arbitrary whitespace
+        pattern = re.compile(r'\{\{\s*(\w+)\s*\}\}')
+        
+        # Max iterations to handle nested variables like {{ ssh_user_home }} -> /home/{{ ssh_user }}
+        for _ in range(5):
+            replaced = False
+            def sub_cb(m):
+                nonlocal replaced
+                var_name = m.group(1)
+                if var_name in self.vars:
+                    replaced = True
+                    return str(self.vars[var_name])
+                return m.group(0)
+            new_value = pattern.sub(sub_cb, value)
+            if not replaced or new_value == value:
+                break
+            value = new_value
+        return value
+
     def parse_inventory(self, path):
         inventory = {}
         all_hosts = {}
@@ -63,16 +102,24 @@ class CephFSPerfTest:
                 if current_section:
                     # Host line looks like: ceph53 ansible_ssh_host=13.120.88.238 ...
                     # Or it could be just a hostname
-                    parts = line.split()
+                    parts = line.split(None, 1)
                     if not parts:
                         continue
                     
                     host_name = parts[0]
                     meta = {'name': host_name}
-                    for kv in parts[1:]:
-                        if '=' in kv:
-                            k, v = kv.split('=', 1)
-                            meta[k] = v.strip("'\"")
+
+                    if len(parts) > 1:
+                        rest = parts[1]
+                        # Match key=value where value can be:
+                        # - single or double quoted string
+                        # - an Ansible-style macro {{ ... }} possibly with spaces
+                        # - a simple non-space token
+                        kv_pattern = re.compile(r'([a-zA-Z0-9_-]+)=((?:"[^"]*"|\'[^\']*\'|\{\{.*?\}\}|[^\s\'\"])+)')
+                        for m in kv_pattern.finditer(rest):
+                            k = m.group(1)
+                            v = m.group(2).strip("'\"")
+                            meta[k] = self.expand_vars(v)
                     
                     inventory[current_section].append(meta)
                     # Use setdefault to avoid overwriting metadata if host is in multiple groups
