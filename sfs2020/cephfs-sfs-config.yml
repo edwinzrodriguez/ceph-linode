@@ -1,5 +1,8 @@
 - hosts: all
   become: true
+  vars:
+    debuginfo_repo_name: "{{ 'baseos-debuginfo' if ansible_distribution == 'CentOS' else 'baseos-debug-rpms' if ansible_distribution == 'RedHat' else 'baseos-debuginfo' }}"
+    crb_debuginfo_repo_name: "{{ 'crb-debuginfo' if ansible_distribution == 'CentOS' else 'codeready-builder-for-rhel-' ~ ansible_distribution_major_version ~ '-x86_64-debug-rpms' if ansible_distribution == 'RedHat' else 'crb-debuginfo' }}"
   tasks:
     - name: Fix baseos-debuginfo repository mirrors (prevent 404s)
       ansible.builtin.shell:
@@ -17,6 +20,7 @@
             # Comment out metalink as it is currently returning 404
             sed -i '/^\[baseos-debuginfo\]/,/^\[/ s|^metalink=|#metalink=|' "$REPO_FILE"
           fi
+      when: ansible_distribution == 'CentOS'
       ignore_errors: yes
 
     - name: Ensure config-manager is available
@@ -25,26 +29,46 @@
         state: present
         update_cache: yes
 
-    - name: Check if baseos-debuginfo repository is already enabled
+    - name: Check if debuginfo repository is already enabled
       ansible.builtin.shell:
-        cmd: dnf repolist enabled | grep -q baseos-debuginfo
+        cmd: dnf repolist enabled | grep -q "{{ debuginfo_repo_name }}"
       register: debuginfo_enabled
       failed_when: false
       changed_when: false
 
-    - name: Enable baseos-debuginfo repository
+    - name: Enable debuginfo repository
       ansible.builtin.shell:
-        cmd: dnf config-manager --set-enabled baseos-debuginfo
+        cmd: dnf config-manager --set-enabled "{{ debuginfo_repo_name }}"
       when: debuginfo_enabled.rc != 0
+      ignore_errors: yes
+
+    - name: Check if CRB debuginfo repository is already enabled
+      ansible.builtin.shell:
+        cmd: dnf repolist enabled | grep -q "{{ crb_debuginfo_repo_name }}"
+      register: crb_debuginfo_enabled
+      failed_when: false
+      changed_when: false
+
+    - name: Enable CRB debuginfo repository
+      ansible.builtin.shell:
+        cmd: dnf config-manager --set-enabled "{{ crb_debuginfo_repo_name }}"
+      when: crb_debuginfo_enabled.rc != 0
+      ignore_errors: yes
+
+    - name: Clean DNF cache
+      ansible.builtin.command:
+        cmd: dnf clean all
 
     - name: Update all packages
       ansible.builtin.dnf:
         name: "*"
         state: latest
+      when: ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat'
 
     - name: Autoremove unneeded packages installed as dependencies
       ansible.builtin.dnf:
         autoremove: yes
+      when: ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat'
 
     - name: Install systemtap and related packages
       ansible.builtin.dnf:
@@ -54,8 +78,11 @@
           - kernel-debuginfo
           - kernel-devel
           - kernel-debuginfo-common-x86_64
-        enablerepo: baseos-debuginfo
+        enablerepo:
+          - "{{ debuginfo_repo_name }}"
+          - "{{ crb_debuginfo_repo_name }}"
         state: present
+        update_cache: yes
 
     - name: Install perf tools
       ansible.builtin.dnf:
@@ -117,7 +144,11 @@
       ansible.builtin.shell:
         cmd: |
           dnf install -y epel-release
-          dnf config-manager --set-enabled crb
+          if [ "{{ ansible_distribution }}" = "RedHat" ]; then
+            dnf config-manager --set-enabled codeready-builder-for-rhel-{{ ansible_distribution_major_version }}-x86_64-rpms
+          else
+            dnf config-manager --set-enabled crb
+          fi
       ignore_errors: yes
 
     - name: Install SPECstorage2020 dependencies (DNF)

@@ -15,5 +15,58 @@
 - hosts: osds
   become: yes
   tasks:
-    - name: wipe /dev/sdc
-      shell: wipefs -a /dev/sdc
+  # This cleans up after a nuke operation (disks are not wiped)
+  # This will fail if the lvm volume is busy
+  - name: clear old lvm volumes
+    shell: lvremove --yes /dev/ceph*/*
+    ignore_errors: yes
+
+  - name: read cluster.json (base)
+    set_fact:
+      cluster_cfg: "{{ lookup('file', playbook_dir ~ '/../cluster.json') | from_json }}"
+
+  - name: locate osd node config (group=osds)
+    set_fact:
+      osd_node_cfg: >-
+        {{
+          (cluster_cfg.nodes | selectattr('group', 'defined') | selectattr('group', 'equalto', 'osds') | list + [none]) | first
+          or
+          (cluster_cfg.nodes | selectattr('groups', 'defined') | selectattr('groups', 'contains', 'osds') | list + [none]) | first
+        }}
+
+  - name: validate cluster.json has an osds node entry
+    fail:
+      msg: >-
+        cluster.json is missing a nodes[] entry with group/groups containing "osds".
+        Add an OSD node definition that includes "osd_devices_by_host".
+    when: osd_node_cfg is none
+
+  - name: compute osd_devices_by_host from cluster.json
+    set_fact:
+      osd_devices_by_host: "{{ osd_node_cfg.get('osd_devices_by_host', {}) }}"
+
+  - name: compute devices to wipe for this host
+    set_fact:
+      osd_devices_to_wipe: "{{ osd_devices_by_host.get(inventory_hostname, []) }}"
+
+  - name: validate this OSD host has a device list in cluster.json
+    fail:
+      msg: >-
+        Missing OSD device list for host '{{ inventory_hostname }}'.
+        Add it under nodes[].osd_devices_by_host in cluster.json, e.g.:
+        "osd_devices_by_host": { "{{ inventory_hostname }}": ["/dev/sdX"] }
+    when: (osd_devices_to_wipe | length) == 0
+
+  - name: wipe OSD devices
+    shell: "wipefs -a {{ item }}"
+    loop: "{{ osd_devices_to_wipe }}"
+    ignore_errors: yes
+
+  - name: check for osd logrotate config
+    local_action: stat path="ceph-osd.logrotate"
+    register: ceph_osd_logrotate
+    become: false
+
+  - name: copy ceph osd logrotate config
+    copy: src=ceph-osd.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
+    when: ceph_osd_logrotate.stat.exists

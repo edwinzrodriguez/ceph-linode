@@ -18,7 +18,7 @@
 # - updates packages
 # - sets up log rotation
 # - configures the core dump location for easy retrieval via other ansible playbooks
-# - tries to wipe the /dev/sdc device on OSDs (only works if the OSD is down);
+# - ensures OSD devices are wiped (handled by playbooks/wipe-osds.yml);
 #   this is necessary after nuking the cluster as Linode does not wipe the disks
 #   immediately after deletion.
 
@@ -123,6 +123,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+      exclude: libarrow*,parquet-libs*,re2*
       state: present
 
   - name: Add IBM Storage Ceph repository (RHEL 9/10)
@@ -166,15 +167,16 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
+      exclude: libarrow*,parquet-libs*,re2*
       state: present
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
 
-#  - name: update packages
-#    yum:
-#      name: "*"
-#      state: latest
-#      update_cache: yes
+  - name: Update all packages
+    ansible.builtin.dnf:
+      name: "*"
+      state: latest
+    when: ansible_distribution == 'CentOS'
 
   # package setup
   # - logrotate needs psmisc for killall
@@ -218,65 +220,6 @@
     copy: src=ceph-mds.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
     when: ceph_mds_logrotate.stat.exists
 
-- hosts: osds
-  become: yes
-  tasks:
-  # This cleans up after a nuke operation (disks are not wiped)
-  # This will fail if the lvm volume is busy
-  - name: clear old lvm volumes
-    shell: lvremove --yes /dev/ceph*/*
-    ignore_errors: yes
-
-  - name: read cluster.json (base)
-    set_fact:
-      cluster_cfg: "{{ lookup('file', 'cluster.json') | from_json }}"
-
-  - name: locate osd node config (group=osds)
-    set_fact:
-      osd_node_cfg: >-
-        {{
-          (cluster_cfg.nodes | selectattr('group', 'defined') | selectattr('group', 'equalto', 'osds') | list + [none]) | first
-          or
-          (cluster_cfg.nodes | selectattr('groups', 'defined') | selectattr('groups', 'contains', 'osds') | list + [none]) | first
-        }}
-
-  - name: validate cluster.json has an osds node entry
-    fail:
-      msg: >-
-        cluster.json is missing a nodes[] entry with group/groups containing "osds".
-        Add an OSD node definition that includes "osd_devices_by_host".
-    when: osd_node_cfg is none
-
-  - name: compute osd_devices_by_host from cluster.json
-    set_fact:
-      osd_devices_by_host: "{{ osd_node_cfg.get('osd_devices_by_host', {}) }}"
-
-  - name: compute devices to wipe for this host
-    set_fact:
-      osd_devices_to_wipe: "{{ osd_devices_by_host.get(inventory_hostname, []) }}"
-
-  - name: validate this OSD host has a device list in cluster.json
-    fail:
-      msg: >-
-        Missing OSD device list for host '{{ inventory_hostname }}'.
-        Add it under nodes[].osd_devices_by_host in cluster.json, e.g.:
-        "osd_devices_by_host": { "{{ inventory_hostname }}": ["/dev/sdX"] }
-    when: (osd_devices_to_wipe | length) == 0
-  # This cleans up after a nuke operation (disks are not wiped)
-  # This will fail if the lvm volume is busy
-  - name: wipe OSD devices
-    shell: "wipefs -a {{ item }}"
-    loop: "{{ osd_devices_to_wipe }}"
-    ignore_errors: yes
-
-  - name: check for osd logrotate config
-    local_action: stat path="ceph-osd.logrotate"
-    register: ceph_osd_logrotate
-    become: false
-
-  - name: copy ceph osd logrotate config
-    copy: src=ceph-osd.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
-    when: ceph_osd_logrotate.stat.exists
 
 - hosts: mons
   become: yes

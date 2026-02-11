@@ -16,6 +16,9 @@
 - name: preconfigure linodes
   import_playbook: pre-config.yml
 
+- name: wipe OSDs
+  import_playbook: playbooks/wipe-osds.yml
+
 - hosts: mons mgrs osds mdss grafana-servers clients
   become: yes
   tasks:
@@ -329,6 +332,13 @@
   tasks:
   - name: "add {{ RELEASE }} repos"
     shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
+    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
+
+  - name: Install cephadm (RHEL 9/10)
+    ansible.builtin.dnf:
+      name: cephadm
+      state: present
+    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
     shell: "{{ ssh_user_home }}/cephadm install ceph-common ceph-fuse"
