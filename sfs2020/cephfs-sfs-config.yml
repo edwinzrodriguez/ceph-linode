@@ -239,3 +239,57 @@
       ansible.builtin.shell:
         cmd: pyupgrade --py3-plus /SPEC2020/SM2020
       ignore_errors: yes
+      when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
+
+- hosts: mons
+  become: true
+  tasks:
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Determine if firewalld is running
+      ansible.builtin.set_fact:
+        firewalld_running: "{{ 'firewalld.service' in ansible_facts.services and ansible_facts.services['firewalld.service'].state == 'running' }}"
+
+    - name: Determine if iptables is running
+      ansible.builtin.set_fact:
+        iptables_running: "{{ 'iptables.service' in ansible_facts.services and ansible_facts.services['iptables.service'].state == 'running' }}"
+
+    - name: Query firewalld for port 5004/tcp
+      ansible.builtin.command: firewall-cmd --query-port=5004/tcp
+      register: fw_query
+      failed_when: false
+      changed_when: false
+      when: firewalld_running | default(false)
+
+    - name: Allow TCP port 5004 via firewalld (permanent)
+      ansible.builtin.command: firewall-cmd --add-port=5004/tcp --permanent
+      when:
+        - firewalld_running | default(false)
+        - fw_query.rc is defined and fw_query.rc != 0
+
+    - name: Reload firewalld after adding port 5004
+      ansible.builtin.command: firewall-cmd --reload
+      when:
+        - firewalld_running | default(false)
+        - fw_query.rc is defined and fw_query.rc != 0
+
+    - name: Check if iptables already allows 5004/tcp
+      ansible.builtin.command: iptables -C INPUT -p tcp --dport 5004 -j ACCEPT
+      register: ipt_check
+      failed_when: false
+      changed_when: false
+      when: iptables_running | default(false)
+
+    - name: Add iptables rule to allow 5004/tcp
+      ansible.builtin.command: iptables -I INPUT -p tcp --dport 5004 -j ACCEPT
+      when:
+        - iptables_running | default(false)
+        - ipt_check.rc is defined and ipt_check.rc != 0
+
+    - name: Persist iptables rules (best-effort)
+      ansible.builtin.shell: iptables-save > /etc/sysconfig/iptables
+      when:
+        - iptables_running | default(false)
+        - ipt_check.rc is defined and ipt_check.rc != 0
+      ignore_errors: yes
