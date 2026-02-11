@@ -9,6 +9,7 @@ import json
 import datetime
 import configparser
 import re
+import time
 
 class CephFSPerfTest:
     def __init__(self, config_path, inventory_path):
@@ -196,6 +197,43 @@ class CephFSPerfTest:
             self.generate_mds_yaml(fs, mds_count)
             mds_yaml = self.config['mds_yaml_path']
             self.run_remote(self.admin, f"sudo ceph orch apply -i {mds_yaml}")
+
+            # Wait for the filestem to become active
+            print(f"Waiting for filesystem {fs} to become active...")
+            start_time = time.time()
+            timeout = 300 # 5 minutes
+            active = False
+            while time.time() - start_time < timeout:
+                status_raw = self.run_remote(self.admin, f"sudo ceph fs status {fs} --format json")
+                try:
+                    status = json.loads(status_raw)
+                    # For Ceph Reef+, 'mdsmap' usually contains the MDS info. 
+                    # We check if there's at least one MDS in 'active' state.
+                    mdsmap = status.get('mdsmap')
+                    # In some versions, 'mdsmap' is a dict with counts (e.g., {'up:active': N}).
+                    # In others, it's a list of MDS entries with a 'state' field.
+                    if isinstance(mdsmap, dict):
+                        if (mdsmap.get('up:active', 0) or mdsmap.get('active', 0)) > 0:
+                            active = True
+                            break
+                    elif isinstance(mdsmap, list):
+                        for entry in mdsmap:
+                            st = str(entry.get('state', '')).lower()
+                            # Accept 'active', 'up:active', or any state containing 'active'
+                            if st == 'active' or st.endswith('active') or 'active' in st:
+                                active = True
+                                break
+                        if active:
+                            break
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                
+                time.sleep(10)
+            
+            if active:
+                print(f"Filesystem {fs} is now active.")
+            else:
+                print(f"Warning: Timeout waiting for filesystem {fs} to become active.")
 
             # Setup client auth for each FS
             self.setup_client_auth(fs)
