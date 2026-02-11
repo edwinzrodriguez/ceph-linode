@@ -123,7 +123,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: libarrow*,parquet-libs*,re2*
+      exclude: libarrow*,parquet-libs*,re2*,python3-grpcio*,grpc-data*
       state: present
 
   - name: Add IBM Storage Ceph repository (RHEL 9/10)
@@ -167,7 +167,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: libarrow*,parquet-libs*,re2*
+      exclude: libarrow*,parquet-libs*,re2*,python3-grpcio*,grpc-data*
       state: present
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
