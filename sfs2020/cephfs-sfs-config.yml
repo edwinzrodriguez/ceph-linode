@@ -255,34 +255,34 @@
       ansible.builtin.set_fact:
         iptables_running: "{{ 'iptables.service' in ansible_facts.services and ansible_facts.services['iptables.service'].state == 'running' }}"
 
-    - name: Query firewalld for port 5004/tcp
-      ansible.builtin.command: firewall-cmd --query-port=5004/tcp
+    - name: Query firewalld for port range 5000-6000/tcp
+      ansible.builtin.command: firewall-cmd --query-port=5000-6000/tcp
       register: fw_query
       failed_when: false
       changed_when: false
       when: firewalld_running | default(false)
 
-    - name: Allow TCP port 5004 via firewalld (permanent)
-      ansible.builtin.command: firewall-cmd --add-port=5004/tcp --permanent
+    - name: Allow TCP port range 5000-6000 via firewalld (permanent)
+      ansible.builtin.command: firewall-cmd --add-port=5000-6000/tcp --permanent
       when:
         - firewalld_running | default(false)
         - fw_query.rc is defined and fw_query.rc != 0
 
-    - name: Reload firewalld after adding port 5004
+    - name: Reload firewalld after adding port range 5000-6000
       ansible.builtin.command: firewall-cmd --reload
       when:
         - firewalld_running | default(false)
         - fw_query.rc is defined and fw_query.rc != 0
 
-    - name: Check if iptables already allows 5004/tcp
-      ansible.builtin.command: iptables -C INPUT -p tcp --dport 5004 -j ACCEPT
+    - name: Check if iptables already allows 5000-6000/tcp
+      ansible.builtin.command: iptables -C INPUT -p tcp --dport 5000:6000 -j ACCEPT
       register: ipt_check
       failed_when: false
       changed_when: false
       when: iptables_running | default(false)
 
-    - name: Add iptables rule to allow 5004/tcp
-      ansible.builtin.command: iptables -I INPUT -p tcp --dport 5004 -j ACCEPT
+    - name: Add iptables rule to allow 5000-6000/tcp
+      ansible.builtin.command: iptables -I INPUT -p tcp --dport 5000:6000 -j ACCEPT
       when:
         - iptables_running | default(false)
         - ipt_check.rc is defined and ipt_check.rc != 0
