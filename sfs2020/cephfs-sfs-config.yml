@@ -233,7 +233,7 @@
 
     - name: Install pyupgrade
       ansible.builtin.shell:
-        cmd: pip3 install pyupgrade
+        cmd: sudo pip3 install pyupgrade
 
     - name: Run pyupgrade on SM2020
       ansible.builtin.shell:
