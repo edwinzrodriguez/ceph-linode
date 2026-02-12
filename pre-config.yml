@@ -172,6 +172,18 @@
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
 
+  - name: Install systemtap and related packages
+    ansible.builtin.dnf:
+      name:
+        - systemtap
+        - systemtap-runtime
+        - kernel-debuginfo
+        - kernel-devel
+        - kernel-debuginfo-common-x86_64
+      enablerepo: baseos-debuginfo
+      state: present
+      when: ansible_distribution_major_version | int >= 9
+
   - name: Update all packages
     ansible.builtin.dnf:
       name: "*"
