@@ -296,14 +296,19 @@ class CephFSPerfTest:
             'service_id': fs,
             'placement': {
                 'hosts': selected_hosts
-            }
+            },
+            'extra_container_args': [
+                "--privileged",
+                "--cap-add", "SYS_MODULE",
+                "-v", "/sys/kernel/debug:/sys/kernel/debug:rw",
+                "-v", "/usr/src/kernels:/usr/src/kernels:ro",
+                "-v", "/usr/lib/modules:/usr/lib/modules:ro",
+                "-v", "/usr/lib/debug:/usr/lib/debug:ro"
+            ]
         }
 
         if has_sfs2020:
-            # To allow perf inside the container, we need extra privileges.
-            # Cephadm doesn't support 'privileged: true' as a top-level ServiceSpec field,
-            # so we pass it via extra_container_args.
-            mds_spec['extra_container_args'] = ["-v", "/sfs2020:/sfs2020", "--privileged"]
+            mds_spec['extra_container_args'].extend(["-v", "/sfs2020:/sfs2020"])
         
         local_mds_yaml = "mds.yaml" # Assuming we write it locally first
         with open(local_mds_yaml, 'w') as f:
