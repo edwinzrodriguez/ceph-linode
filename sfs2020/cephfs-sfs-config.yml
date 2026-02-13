@@ -20,7 +20,7 @@
             # Comment out metalink as it is currently returning 404
             sed -i '/^\[baseos-debuginfo\]/,/^\[/ s|^metalink=|#metalink=|' "$REPO_FILE"
           fi
-      when: ansible_distribution == 'CentOS'
+      when: ansible_distribution == 'CentOS' and false
       ignore_errors: yes
 
     - name: Ensure config-manager is available
@@ -83,6 +83,11 @@
           - "{{ crb_debuginfo_repo_name }}"
         state: present
         update_cache: yes
+
+    - name: Run stap-prep
+      ansible.builtin.shell:
+        cmd: stap-prep --enablerepo="{{ debuginfo_repo_name }},{{ crb_debuginfo_repo_name }}"
+      ignore_errors: yes
 
     - name: Install perf tools
       ansible.builtin.dnf:

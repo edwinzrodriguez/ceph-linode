@@ -51,6 +51,19 @@
     run_once: true
     delegate_to: localhost
 
+  - name: Fix broken CentOS Stream repositories mirror
+    ansible.builtin.shell:
+      cmd: |
+        if grep -q "http://mirrors.adn.networklayer.com" /etc/yum.repos.d/centos.repo; then
+          echo "Detected problematic mirror. Reinstalling centos-stream-repos and centos-gpg-keys..."
+          # Download official repos and keys
+          # Note: We use --force and --nodeps to ensure we overwrite the broken ones even if dnf is in a weird state
+          rpm -ivh --force --nodeps https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
+                                     https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm
+        fi
+    when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int == 9
+    ignore_errors: yes
+
   # coredump capture setup
   - name: create crash directory
     file:
@@ -123,7 +136,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: libarrow*,parquet-libs*,re2*,python3-grpcio*,grpc-data*
+      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*' if ansible_distribution_major_version | int >= 10 else '' }}"
       state: present
 
   - name: Add IBM Storage Ceph repository (RHEL 9/10)
@@ -167,7 +180,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: libarrow*,parquet-libs*,re2*,python3-grpcio*,grpc-data*
+      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*' if ansible_distribution_major_version | int >= 10 else '' }}"
       state: present
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
@@ -177,12 +190,14 @@
       name:
         - systemtap
         - systemtap-runtime
-        - kernel-debuginfo
-        - kernel-devel
-        - kernel-debuginfo-common-x86_64
-      enablerepo: baseos-debuginfo
       state: present
-      when: ansible_distribution_major_version | int >= 9
+    when: ansible_distribution_major_version | int >= 9
+
+  - name: Run stap-prep
+    ansible.builtin.shell:
+      cmd: stap-prep
+    when: ansible_distribution_major_version | int >= 9
+    ignore_errors: yes
 
   - name: Update all packages
     ansible.builtin.dnf:

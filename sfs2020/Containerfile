@@ -59,5 +59,4 @@ RUN rpm --import 'https://download.ceph.com/keys/release.asc' &&  \
     systemtap-runtime \
     kernel-devel \
     kernel-debuginfo-common-x86_64 \
-    kernel-debug && \
-    /usr/bin/stap-prep
+    kernel-debug
