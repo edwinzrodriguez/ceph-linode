@@ -179,9 +179,67 @@ class CephFSPerfTest:
             # Remove MDS service via orchestrator
             self.run_remote(self.admin, f"sudo ceph orch rm mds.{fs} || true")
             
+            # Wait for MDS service to be removed
+            print(f"Waiting for MDS service mds.{fs} to be removed...")
+            start_wait = time.time()
+            while time.time() - start_wait < 120:
+                services = self.run_remote(self.admin, "sudo ceph orch ls --format json")
+                try:
+                    services_json = json.loads(services)
+                    found = False
+                    for svc in services_json:
+                        if svc.get('service_type') == 'mds' and svc.get('service_id') == fs:
+                            found = True
+                            break
+                    if not found:
+                        break
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                time.sleep(5)
+
             # Delete existing FS
             self.run_remote(self.admin, f"sudo ceph fs fail {fs} --yes-i-really-mean-it || true")
+            
+            # Wait for FS to be failed (rank 0 should be gone or in 'failed' state in 'ceph fs dump')
+            print(f"Waiting for filesystem {fs} to fail...")
+            start_wait = time.time()
+            while time.time() - start_wait < 60:
+                fs_dump = self.run_remote(self.admin, "sudo ceph fs dump --format json")
+                try:
+                    fs_dump_json = json.loads(fs_dump)
+                    filesystems = fs_dump_json.get('filesystems', [])
+                    found_active = False
+                    for fsys in filesystems:
+                        if fsys.get('mdsmap', {}).get('fs_name') == fs:
+                            up = fsys.get('mdsmap', {}).get('up', {})
+                            if up: # if up is not empty, it means there are still active/assigned MDS
+                                found_active = True
+                            break
+                    if not found_active:
+                        break
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                time.sleep(2)
+
             self.run_remote(self.admin, f"sudo ceph fs rm {fs} --yes-i-really-mean-it || true")
+
+            # Wait for FS to be removed
+            print(f"Waiting for filesystem {fs} to be removed...")
+            start_wait = time.time()
+            while time.time() - start_wait < 60:
+                fs_ls = self.run_remote(self.admin, "sudo ceph fs ls --format json")
+                try:
+                    fs_ls_json = json.loads(fs_ls)
+                    found = False
+                    for fsys in fs_ls_json:
+                        if fsys.get('name') == fs:
+                            found = True
+                            break
+                    if not found:
+                        break
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                time.sleep(2)
 
             # Delete existing pools
             self.run_remote(self.admin, f"sudo ceph osd pool delete {fs}_metadata {fs}_metadata --yes-i-really-really-mean-it || true")
