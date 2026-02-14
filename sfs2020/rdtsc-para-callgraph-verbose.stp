@@ -1,5 +1,8 @@
 #!/usr/bin/stap
 
+# sudo nsenter -t $(pgrep ceph-mds) -a
+# sudo stap rdtsc-para-callgraph-verbose.stp 'process(2).function("*")'
+
 function trace(entry_p, extra) {
   %( $# > 1 %? if (tid() in trace) %)
   printf("%12ld %s%s%s %s\n",
