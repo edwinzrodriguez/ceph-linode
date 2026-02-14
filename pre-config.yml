@@ -56,12 +56,29 @@
       cmd: |
         if grep -q "http://mirrors.adn.networklayer.com" /etc/yum.repos.d/centos.repo; then
           echo "Detected problematic mirror. Reinstalling centos-stream-repos and centos-gpg-keys..."
+          # Remove broken repo files before reinstalling
+          rm -f /etc/yum.repos.d/centos.repo /etc/yum.repos.d/centos-addons.repo
           # Download official repos and keys
           # Note: We use --force and --nodeps to ensure we overwrite the broken ones even if dnf is in a weird state
           rpm -ivh --force --nodeps https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
                                      https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm
         fi
     when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int == 9
+    ignore_errors: yes
+
+  - name: Fix broken CentOS Stream repositories mirror
+    ansible.builtin.shell:
+      cmd: |
+        if grep -q "http://mirrors.adn.networklayer.com" /etc/yum.repos.d/centos.repo; then
+          echo "Detected problematic mirror. Reinstalling centos-stream-repos and centos-gpg-keys..."
+          # Remove broken repo files before reinstalling
+          rm -f /etc/yum.repos.d/centos.repo /etc/yum.repos.d/centos-addons.repo
+          # Download official repos and keys
+          # Note: We use --force and --nodeps to ensure we overwrite the broken ones even if dnf is in a weird state
+          rpm -ivh --force --nodeps https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/centos-stream-repos-10.0-19.el10.noarch.rpm \
+                                     https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/centos-gpg-keys-10.0-19.el10.noarch.rpm
+        fi
+    when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int == 10
     ignore_errors: yes
 
   # coredump capture setup
@@ -139,20 +156,20 @@
       exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*' if ansible_distribution_major_version | int >= 10 else '' }}"
       state: present
 
-  - name: Add IBM Storage Ceph repository (RHEL 9/10)
+  - name: Add IBM Storage Ceph repository (RHEL/CentOS 9/10)
     ansible.builtin.get_url:
       url: "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-9-rhel-{{ ansible_distribution_major_version }}.repo"
       dest: /etc/yum.repos.d/ibm-storage-ceph.repo
       owner: root
       group: root
       mode: '0644'
-    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
-  - name: Install IBM Storage Ceph license (RHEL 9/10)
+  - name: Install IBM Storage Ceph license (RHEL/CentOS 9/10)
     ansible.builtin.dnf:
       name: ibm-storage-ceph-license
       state: present
-    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
   - name: Accept IBM license
     ansible.builtin.file:
@@ -161,7 +178,7 @@
       owner: root
       group: root
       mode: '0755'
-    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
   - name: Touch IBM license accept file
     ansible.builtin.file:
@@ -170,7 +187,7 @@
       owner: root
       group: root
       mode: '0644'
-    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
   - name: enable epel-next repo (if available)
     yum_repository:
@@ -203,7 +220,7 @@
     ansible.builtin.dnf:
       name: "*"
       state: latest
-    when: ansible_distribution == 'CentOS'
+    when: ansible_distribution in ['CentOS', 'RedHat']
 
   # package setup
   # - logrotate needs psmisc for killall

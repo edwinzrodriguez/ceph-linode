@@ -117,47 +117,15 @@
 - hosts: mons mgrs osds mdss clients
   become: yes
   tasks:
-  - name: fetch cephadm
-    become: no
-    delegate_to: localhost
-    run_once: true
-    ansible.builtin.get_url:
-      url: "https://download.ceph.com/rpm-{{ RELEASE }}/el9/noarch/cephadm"
-      dest: "/tmp/cephadm-{{ RELEASE }}"
-      mode: "0755"
-      force: yes
-    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
 
-  - name: distribute cephadm
-    copy:
-      dest: "{{ ssh_user_home }}/cephadm"
-      group: root
-      mode: 0755
-      owner: root
-      src: "/tmp/cephadm-{{ RELEASE }}"
-      remote_src: false
-    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
-
-  - name: "add {{ RELEASE }} repos"
-    shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
-    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
-
-  - name: Install cephadm (RHEL 9/10)
+  - name: Install cephadm (RHEL/CentOS 9/10)
     ansible.builtin.dnf:
       name: cephadm
       state: present
-    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
-
-  - name: Symlink cephadm to home (RHEL 9/10)
-    ansible.builtin.file:
-      src: /usr/sbin/cephadm
-      dest: "{{ ssh_user_home }}/cephadm"
-      state: link
-      force: yes
-    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
-    shell: "{{ ssh_user_home }}/cephadm install ceph-common"
+    shell: "cephadm install ceph-common"
 
 - hosts: mons
   become: yes
@@ -297,7 +265,7 @@
     register: ceph_installed
 
   - name: "cephadm bootstrap"
-    shell: "{{ ssh_user_home }}/cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key {{ ssh_user_home }}/.ssh/id_ed25519 --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub --apply-spec {{ ssh_user_home }}/cluster.spec --skip-mon-network"
+    shell: "cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key {{ ssh_user_home }}/.ssh/id_ed25519 --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub --apply-spec {{ ssh_user_home }}/cluster.spec --skip-mon-network"
     when: not ceph_installed.stat.exists
 
   - name: config public network
@@ -330,18 +298,14 @@
 - hosts: clients
   become: yes
   tasks:
-  - name: "add {{ RELEASE }} repos"
-    shell: "{{ ssh_user_home }}/cephadm add-repo {{ CEPHADM_REPO }}"
-    when: not (ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9)
-
-  - name: Install cephadm (RHEL 9/10)
+  - name: Install cephadm (RHEL/CentOS 9/10)
     ansible.builtin.dnf:
       name: cephadm
       state: present
-    when: ansible_distribution == "RedHat" and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
-    shell: "{{ ssh_user_home }}/cephadm install ceph-common ceph-fuse"
+    shell: "cephadm install ceph-common ceph-fuse"
 
   - name: generate min config
     shell: ceph config generate-minimal-conf
