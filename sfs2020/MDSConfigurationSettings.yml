@@ -1,0 +1,34 @@
+nodes:
+  admin: "root@172.21.13.10"
+  servers: ["root@172.21.13.12", "root@172.21.13.13", "root@172.21.13.14"]
+  clients: ["root@172.21.13.11"]
+
+fs_name: "perf_test_fs"
+num_filesystems: 1
+mds_yaml_path: "/sfs2020/mds.yaml" # Contains 'service_type: mds' spec
+
+specstorage:
+  prototype: "/sfs2020/sfs_rc"
+  output_path: "/sfs2020/spec_2020.txt"
+  run_command: "/sfs2020/run_workload.py"
+  workload_dir: "/sfs2020/SPECstorage2020"
+  results_base_dir: "/sfs2020/SPECstorage2020/results"
+  mounts_per_fs: 1
+  perf_record: true
+  perf_record_script: "/sfs2020/perf_record.py"
+  perf_record_executable: "ceph-mds"
+  perf_record_duration: 5
+  perf_record_flamegraph_path: "/sfs2020/FlameGraph"
+
+# Ranges for MDS settings (start, stop, step)
+mds_settings:
+#  max_mds: [1, 2, 1]
+  mds_cache_memory_limit: [128Gi, 64Gi, 16Gi, 4Gi]
+#  mds_cache_memory_limit: [1Gi, 4Gi, 16Gi, 64Gi, 192Gi]
+
+#  mds_max_caps_per_client: [100k, 200k, 100k]
+#  mds_recall_max_caps: [5k, 10k, 5k]
+#  mds_recall_max_decay_rate: [1, 2, 1]
+#  mds_cache_trim_threshold: [64Ki, 128Ki, 64Ki]
+##  mds_cache_reservation: [5, 10, 5]
+##  mds_log_max_segments: [30, 60, 30]

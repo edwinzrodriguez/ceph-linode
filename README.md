@@ -39,6 +39,8 @@ This installs the following commands:
 The repository has a number of utilities roughly organized as:
 
 * `linode.py`: script to rapidly create/configure/nuke/destroy Linodes.
+* 
+* `ibmnode.py`: script to rapidly create/configure/nuke/destroy nodes on ibm cloud.
 
 * `cluster.json`: the description of the cluster to deploy.
 
@@ -81,6 +83,23 @@ The repository has a number of utilities roughly organized as:
   ^D
   ```
 
+* If using IBM Cloud, setup an IBM Cloud account and [get an API key](https://cloud.ibm.com/iam/apikeys).
+
+  Create `ibm-credentials.env` with your VPC details:
+
+  ```bash
+  cat > ibm-credentials.env
+  VPC_URL=https://eu-es.iaas.cloud.ibm.com/v1
+  VPC_APIKEY=your-api-key-here
+  ^D
+  ```
+
+  Common `VPC_URL` endpoints:
+  - `https://us-east.iaas.cloud.ibm.com/v1`
+  - `https://us-south.iaas.cloud.ibm.com/v1`
+  - `https://eu-de.iaas.cloud.ibm.com/v1`
+  - `https://eu-es.iaas.cloud.ibm.com/v1`
+
 * Setup an ssh key if not already done:
 
   ```bash
@@ -115,7 +134,7 @@ The repository has a number of utilities roughly organized as:
 * Clone ceph-linode:
 
   ```bash
-  git clone https://github.com/batrick/ceph-linode.git
+  git clone https://github.com/edwinzrodriguez/ceph-linode.git
   ```
 
 * Copy `cluster.json.sample` to `cluster.json` and modify it to have the
@@ -141,7 +160,7 @@ The repository has a number of utilities roughly organized as:
 ## SSH to a particular machine
 
 ```bash
-./ansible-ssh ceph53
+./ansible-ssh mon-000
 ```
 
 Or any named node in the `linodes` JSON file.
@@ -163,6 +182,61 @@ source ansible-env.bash
 do_playbook foo.yml
 ```
 
+## Running SPECstorage 2020 Performance Tests
+
+The `sfs2020/` directory contains tools and playbooks specifically for running [SPECstorage 2020](https://www.spec.org/storage2020/) workloads against CephFS.
+
+### 1. Configure the Cluster for SFS2020
+
+First, ensure all cluster nodes (including clients) have the necessary dependencies, performance tools (like `perf`, `systemtap`), and the SPECstorage2020 tarball installed.
+
+```bash
+source ansible-env.bash
+do_playbook sfs2020/cephfs-sfs-config.yml
+```
+
+### 2. Configure Test Settings
+
+Edit `sfs2020/MDSConfigurationSettings.yml` to define your test matrix. This file controls:
+*   Filesystem names and counts.
+*   MDS performance configurations (cache limits, max_mds, etc.) to test.
+*   SPECstorage 2020 workload parameters.
+*   Performance recording settings (perf, flamegraphs).
+> :fire: **Note** :fire: The 'nodes' section of `MDSConfigurationSettings.yml` is used to define the clients that will run SPECstorage workloads but is ignored when using ansible_inventory
+### 3. Run the Performance Test
+
+Use the `cephfs_perf_test.py` script to orchestrate the benchmark. It will automatically rebuild filesystems, apply MDS settings, mount CephFS on clients, and run the SPECstorage workload for each combination in your test matrix.
+
+```bash
+python3 sfs2020/cephfs_perf_test.py sfs2020/MDSConfigurationSettings.yml ansible_inventory
+```
+Please note that the `cephfs_perf_test.py` script will automatically rebuild filesystems, apply MDS settings, and mount CephFS on clients for each test combination. It will also generate performance data and flamegraphs for analysis.
+> :fire: **Note** :fire: To collect Linux perf data, the container specified in CEPH_IMAGE must contain the proper packages. You can use sfs2020/ContainerFile to create the image
+
+### 4. Building a Custom Ceph Image for Performance Profiling
+
+To collect detailed performance data (like `perf` or `systemtap`) from within containerized Ceph daemons, you need an image that includes the necessary debug symbols and tools. A `Containerfile` is provided in `sfs2020/` for this purpose.
+
+To build and push your own image:
+
+```bash
+# Build the image
+podman build -t ceph-custom -f sfs2020/Containerfile .
+
+# Tag it for your registry
+podman tag ceph-custom quay.io/your-username/ceph-custom:latest
+
+# Push the image
+podman push quay.io/your-username/ceph-custom:latest
+```
+
+Once pushed, update `CEPH_IMAGE` in `group_vars/all.yml` to use your new image before running `do_playbook cephadm.yml`. Alternatively, if the cluster is already running, you can switch the image using:
+
+```bash
+source ansible-env.bash
+ans -m shell -a "ceph orch upgrade start --image quay.io/your-username/ceph-custom:latest" mons
+```
+
 ## How-to nuke and repave your cluster:
 
 Sometimes you want to start over from a clean slate. Destroying the cluster can
@@ -176,13 +250,13 @@ You can manually nuke the cluster if you want using:
 ceph-linode nuke
 ```
 
-## How-to destroy your cluster:
+## How-to destroy your cluster (same as nuke for IBM Cloud):
 
 ```bash
 ceph-linode destroy
 ```
 
 The script works by destroying all the Linodes that belong to the group named
-in the `LINODE_GROUP` file, created by `linode.py`.
+in the `LINODE_GROUP` (`IBM_GROUP` for IBM Cloud) file, created by `linode.py`.
 
 This deletes EVERYTHING and stops any further billing.
