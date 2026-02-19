@@ -142,6 +142,11 @@
         name: "perl-open.noarch"
         state: latest
 
+    - name: Install tuned-adm tools
+      ansible.builtin.dnf:
+        name: "tuned"
+        state: latest
+
 - hosts: mons osds mdss clients
   become: true
   tasks:
