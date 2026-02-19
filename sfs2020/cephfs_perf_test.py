@@ -252,7 +252,7 @@ class CephFSPerfTest:
             
             # Apply MDS deployment via cephadm
             mds_count = current_settings.get('max_mds', 1)
-            self.generate_mds_yaml(fs, mds_count)
+            self.generate_mds_yaml(fs, mds_count, current_settings)
             mds_yaml = self.config['mds_yaml_path']
             self.run_remote(self.admin, f"sudo ceph orch apply -i {mds_yaml}")
 
@@ -323,7 +323,7 @@ class CephFSPerfTest:
             self.run_remote(self.admin, scp_cmd)
             self.run_remote(client_name, "sudo mv /tmp/ceph.conf /tmp/ceph.client.0.keyring /etc/ceph/")
 
-    def generate_mds_yaml(self, fs, count):
+    def generate_mds_yaml(self, fs, count, current_settings=None):
         print(f"Generating mds.yaml for {fs} with count={count}...")
         
         num_mdss = len(self.mdss)
@@ -365,6 +365,9 @@ class CephFSPerfTest:
             ]
         }
 
+        if current_settings and 'cpus' in current_settings:
+            mds_spec['extra_container_args'].extend(["--cpus", str(current_settings['cpus'])])
+
         if has_sfs2020:
             mds_spec['extra_container_args'].extend(["-v", "/sfs2020:/sfs2020"])
         
@@ -382,6 +385,8 @@ class CephFSPerfTest:
             for key, value in settings.items():
                 if key == "max_mds":
                     self.set_max_mds(fs, value)
+                elif key == "cpus":
+                    continue
                 else:
                     self.run_remote(self.admin, f"sudo ceph config set mds {key} {value}")
 
@@ -456,7 +461,15 @@ class CephFSPerfTest:
             payload['workload_dir'] = workload_dir
         
         # Generate run_name and results_dir
-        mds_part = "_".join([f"{self.snake_to_pascal(k)}-{self.format_si_units(v)}" for k, v in sorted(settings.items()) if k not in ["fs_name", "workload_dir", "num_filesystems"]])
+        mds_parts = []
+        for k, v in sorted(settings.items()):
+            if k in ["fs_name", "workload_dir", "num_filesystems"]:
+                continue
+            if k == "cpus":
+                mds_parts.append(f"cpu{v}")
+            else:
+                mds_parts.append(f"{self.snake_to_pascal(k)}-{self.format_si_units(v)}")
+        mds_part = "_".join(mds_parts)
         
         mounts_per_fs = self.config['specstorage'].get('mounts_per_fs', 1)
         num_clients = len(self.clients)

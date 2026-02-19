@@ -23,8 +23,9 @@ specstorage:
 # Ranges for MDS settings (start, stop, step)
 mds_settings:
 #  max_mds: [1, 2, 1]
-  mds_cache_memory_limit: [128Gi, 64Gi, 16Gi, 4Gi]
+  mds_cache_memory_limit: [64Gi]
 #  mds_cache_memory_limit: [1Gi, 4Gi, 16Gi, 64Gi, 192Gi]
+  cpus: [1, 2, 3, 4]
 
 #  mds_max_caps_per_client: [100k, 200k, 100k]
 #  mds_recall_max_caps: [5k, 10k, 5k]
