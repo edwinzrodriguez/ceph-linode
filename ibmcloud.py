@@ -1114,6 +1114,80 @@ class CephIbmCloud:
             time.sleep(delay)
         raise RuntimeError(f"instance {instance_id} did not reach status {status}")
 
+    def report(self, **kwargs):
+        logging.info(f"report {kwargs}")
+        self._parse_common_options(**kwargs)
+
+        instances = list(self.instances())
+        if not instances:
+            print("No instances found.")
+            return
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+
+        # To calculate cost, we need to fetch profile prices.
+        # This is complex as it depends on region and often requires a different API (Global Catalog or Billing).
+        # For now, we'll report uptime and other available details.
+
+        NAME_W = 20
+        STATUS_W = 10
+        UPTIME_W = 15
+        PROFILE_W = 20
+        ZONE_W = 12
+
+        header = (
+            f"{'name':<{NAME_W}} "
+            f"{'status':<{STATUS_W}} "
+            f"{'uptime':<{UPTIME_W}} "
+            f"{'profile':<{PROFILE_W}} "
+            f"{'zone':<{ZONE_W}}"
+        )
+        print(header)
+        print("-" * len(header))
+
+        for inst in sorted(instances, key=lambda x: x.get("name", "")):
+            name = inst.get("name") or inst.get("id") or "-"
+            status = inst.get("status") or "unknown"
+            profile = inst.get("profile", {}).get("name") or "-"
+            zone = inst.get("zone", {}).get("name") or "-"
+
+            # Calculate uptime
+            created_at_str = inst.get("created_at")
+            uptime_str = "-"
+            if created_at_str:
+                try:
+                    # IBM Cloud created_at can be a string or a datetime object depending on SDK version
+                    if isinstance(created_at_str, str):
+                        # ISO 8601 format like "2024-02-19T10:53:00Z" or "2024-02-19T10:53:00.000Z"
+                        # fromisoformat handles 'Z' in Python 3.11+, for older versions we replace it.
+                        ts = created_at_str.replace("Z", "+00:00")
+                        created_at = datetime.fromisoformat(ts)
+                    else:
+                        created_at = created_at_str
+
+                    delta = now - created_at
+                    days = delta.days
+                    hours, remainder = divmod(delta.seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    if days > 0:
+                        uptime_str = f"{days}d {hours}h {minutes}m"
+                    elif hours > 0:
+                        uptime_str = f"{hours}h {minutes}m"
+                    else:
+                        uptime_str = f"{minutes}m"
+                except (ValueError, TypeError):
+                    uptime_str = "error"
+
+            print(
+                f"{name:<{NAME_W}} "
+                f"{status:<{STATUS_W}} "
+                f"{uptime_str:<{UPTIME_W}} "
+                f"{profile:<{PROFILE_W}} "
+                f"{zone:<{ZONE_W}}"
+            )
+
     def down(self, **kwargs):
         logging.info(f"down {kwargs}")
         self._parse_common_options(**kwargs)
@@ -1202,6 +1276,7 @@ def main(argv):
     subparsers.add_parser("nuke")
     subparsers.add_parser("wait")
     subparsers.add_parser("list")
+    subparsers.add_parser("report")
     subparsers.add_parser("types")
     subparsers.add_parser("down")
     subparsers.add_parser("up")
