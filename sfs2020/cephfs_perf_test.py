@@ -503,6 +503,7 @@ class CephFSPerfTest:
         current_loadpoint = 0
         run_phase_started = False
         perf_triggered_for_current_lp = False
+        logging_triggered_for_current_lp = False
         perf_threads = []
         process = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
         output = []
@@ -510,16 +511,27 @@ class CephFSPerfTest:
             print(f"[{host_name}] {line}", end="")
             output.append(line)
             
+            if "Starting tests..." in line:
+                current_loadpoint += 1
+                run_phase_started = False
+                perf_triggered_for_current_lp = False
+                logging_triggered_for_current_lp = False
+                print(f"Detected Starting tests... Load Point: {current_loadpoint}")
+
+            if "Starting RUN phase" in line:
+                run_phase_started = True
+                if self.config.get('logging', {}).get('enabled', False) and not logging_triggered_for_current_lp:
+                    print(f"Triggering MDS logging for Load Point {current_loadpoint}...")
+                    self.start_mds_logging(current_loadpoint)
+                    logging_triggered_for_current_lp = True
+
+            if "Tests finished" in line:
+                if logging_triggered_for_current_lp:
+                    print(f"Stopping MDS logging for Load Point {current_loadpoint}...")
+                    results_dir = payload.get('results_dir')
+                    self.stop_mds_logging(current_loadpoint, results_dir)
+
             if perf_record_enabled:
-                if "Starting tests..." in line:
-                    current_loadpoint += 1
-                    run_phase_started = False
-                    perf_triggered_for_current_lp = False
-                    print(f"Detected Starting tests... Load Point: {current_loadpoint}")
-
-                if "Starting RUN phase" in line:
-                    run_phase_started = True
-
                 if run_phase_started and not perf_triggered_for_current_lp:
                     if "Run " in line and " percent complete" in line:
                         print(f"Triggering perf record for Load Point {current_loadpoint}...")
@@ -603,6 +615,70 @@ class CephFSPerfTest:
                             self.run_remote(server_name, f"sudo -n rm -f {tmp_path}")
                 else:
                     print(f"[{server_name}] No report files found for Load Point {loadpoint}, skipping copy.")
+
+    def start_mds_logging(self, loadpoint):
+        debug_mds = self.config['logging'].get('debug_mds', 20)
+        debug_ms = self.config['logging'].get('debug_ms', 1)
+        
+        for server_name in self.mdss:
+            print(f"[{server_name}] Starting MDS debug logging for Load Point {loadpoint}")
+            # Enable debug logging
+            self.run_remote(server_name, f"sudo ceph config set mds debug_mds {debug_mds}")
+            self.run_remote(server_name, f"sudo ceph config set mds debug_ms {debug_ms}")
+
+    def stop_mds_logging(self, loadpoint, results_dir=None):
+        for server_name in self.mdss:
+            print(f"[{server_name}] Stopping MDS debug logging for Load Point {loadpoint}")
+            # Reset debug logging to defaults (typically 1/1 or 0/0, but let's use 1/1 as a safe bet for MDS)
+            self.run_remote(server_name, "sudo ceph config set mds debug_mds 1")
+            self.run_remote(server_name, "sudo ceph config set mds debug_ms 1")
+            
+            if results_dir:
+                lp_tag = f"{int(loadpoint):02d}"
+                # The log file is typically in /var/log/ceph/ or inside the container.
+                # Since we are using cephadm, the logs are usually on the host at /var/log/ceph/<fsid>/ceph-mds.<id>.log
+                # However, the requirement says "Logging should go to a different log file for each load point to avoid. 
+                # The log file should be named by client and transferred to output directory"
+                # Wait, "named by client" might mean the client hostname or the MDS name? 
+                # Usually we collect logs from the MDS servers. 
+                # "named by client and transferred to output directory" - maybe it means named by server?
+                
+                # Let's find the current log file and copy it.
+                # For cephadm, logs are at /var/log/ceph/<fsid>/ceph-mds.<name>.log
+                fsid = self.run_remote(server_name, "sudo ceph fsid").strip()
+                log_dir = f"/var/log/ceph/{fsid}"
+                
+                # We need to find the specific MDS daemon(s) running on this server.
+                # 'ceph orch ps --hostname <server_name> --daemon_type mds'
+                ps_output = self.run_remote(self.admin, f"sudo ceph orch ps --hostname {server_name} --daemon_type mds --format json")
+                try:
+                    daemons = json.loads(ps_output)
+                    for daemon in daemons:
+                        daemon_name = daemon.get('daemon_name') # e.g. mds.perf_test_fs.ceph53.vjshxm
+                        if not daemon_name:
+                            continue
+                        
+                        src_log = f"{log_dir}/ceph-{daemon_name}.log"
+                        dest_log = f"{server_name}_lp{lp_tag}_{daemon_name}.log"
+                        
+                        # Copy and rename on the server first
+                        self.run_remote(server_name, f"sudo cp {src_log} /tmp/{dest_log}")
+                        user, _, _ = self.get_ssh_details(server_name)
+                        self.run_remote(server_name, f"sudo chown {user}:{user} /tmp/{dest_log}")
+                        
+                        # Transfer to admin
+                        admin_user, admin_host, admin_port = self.get_ssh_details(self.admin)
+                        copy_cmd = f"scp -o StrictHostKeyChecking=no -P {admin_port} /tmp/{dest_log} {admin_user}@{admin_host}:{results_dir}/"
+                        self.run_remote(server_name, copy_cmd)
+                        
+                        # Cleanup tmp
+                        self.run_remote(server_name, f"rm -f /tmp/{dest_log}")
+                        
+                        # Clear the original log file to avoid overlap for next loadpoint
+                        self.run_remote(server_name, f"sudo truncate -s 0 {src_log}")
+                        
+                except Exception as e:
+                    print(f"Error collecting logs from {server_name}: {e}")
 
     def parse_si_unit(self, value):
         if not isinstance(value, str):
