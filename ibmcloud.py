@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 import requests
@@ -117,6 +118,37 @@ class CephIbmCloud:
 
         self._credentials = creds
         return self._credentials
+
+    def _list_all(self, list_func, collection_name, name=None, **kwargs):
+        results = []
+        start = None
+        if name:
+            kwargs["name"] = name
+        while True:
+            if start:
+                kwargs["start"] = start
+            resp = list_func(**kwargs).get_result()
+            results.extend(resp.get(collection_name, []))
+            start_obj = resp.get("next")
+            if not start_obj:
+                break
+
+            if isinstance(start_obj, dict):
+                # The 'next' field is an object with a 'href' (which contains the 'start' token)
+                href = start_obj.get("href")
+                if href:
+                    import urllib.parse as urlparse
+
+                    parsed = urlparse.urlparse(href)
+                    start = urlparse.parse_qs(parsed.query).get("start", [None])[0]
+                else:
+                    start = start_obj.get("start")
+            else:
+                start = start_obj
+
+            if not start:
+                break
+        return results
 
     @property
     def client(self):
@@ -234,7 +266,7 @@ class CephIbmCloud:
         if not key_name:
             raise RuntimeError("cluster.json must include ssh_key")
 
-        keys = self.client.list_keys().get_result().get("keys", [])
+        keys = self._list_all(self.client.list_keys, "keys")
         for key in keys:
             if key_name in (key.get("id"), key.get("name")):
                 self._ssh_key = key
@@ -429,9 +461,6 @@ class CephIbmCloud:
         raise RuntimeError("unknown instance profile")
 
     def _get_machine_image(self, machine):
-        if self._images is None:
-            self._images = self.client.list_images().get_result().get("images", [])
-
         if machine.get("image"):
             i = machine["image"]
         elif self.cluster.get("image"):
@@ -439,10 +468,89 @@ class CephIbmCloud:
         else:
             raise RuntimeError("cluster.json must include image")
 
-        for image in self._images:
-            if i in (image.get("id"), image.get("name")):
-                return image
+        def find_image(image_list, identifier):
+            if image_list:
+                for image in image_list:
+                    if identifier in (image.get("id"), image.get("name")):
+                        return image
+            return None
+
+        # Check existing images
+        img = find_image(self._images, i)
+        if img:
+            return img
+
+        # Not found or self._images is None, try to fetch only the requested image by name first.
+        new_images = self._list_all(self.client.list_images, "images", name=i)
+        if new_images:
+            if self._images is None:
+                self._images = []
+            for ni in new_images:
+                if not find_image(self._images, ni.get("id")):
+                    self._images.append(ni)
+            img = find_image(self._images, i)
+            if img:
+                return img
+
+        # If still not found, fetch all images.
+        # But only if we haven't already fetched all images or if we're not sure.
+        # To be safe and meet the requirement, we fetch all if the specific name search failed.
+        all_images = self._list_all(self.client.list_images, "images")
+        if self._images is None:
+            self._images = []
+        for ai in all_images:
+            if not find_image(self._images, ai.get("id")):
+                self._images.append(ai)
+
+        img = find_image(self._images, i)
+        if img:
+            return img
+
         raise RuntimeError(f"cannot find image: {i}")
+
+    def list_images(self, name=None, status="available"):
+        images = self._list_all(self.client.list_images, "images", status=status)
+        if name:
+            try:
+                pattern = re.compile(name)
+            except re.error as e:
+                logging.error(f"Invalid regex: {e}")
+                return []
+            images = [
+                i
+                for i in images
+                if (i.get("name") and pattern.search(i.get("name")))
+                or (i.get("id") and pattern.search(i.get("id")))
+            ]
+        return images
+
+    def images(self, **kwargs):
+        logging.info(f"images {kwargs}")
+        self._parse_common_options(**kwargs)
+        name = kwargs.get("name")
+        status = kwargs.get("status", "available")
+        images = self.list_images(name=name, status=status)
+
+        if not images:
+            if name:
+                print(f"No images found matching name: {name} (status: {status})")
+            else:
+                print(f"No images found (status: {status}).")
+            return
+
+        NAME_W = 40
+        ID_W = 40
+        STATUS_W = 15
+
+        header = f"{'name':<{NAME_W}} {'status':<{STATUS_W}} {'id':<{ID_W}}"
+        print(header)
+        print("-" * len(header))
+
+        for img in sorted(images, key=lambda x: x.get("name", "")):
+            name = img.get("name", "-")
+            status = img.get("status", "-")
+            iid = img.get("id", "-")
+            print(f"{name:<{NAME_W}} {status:<{STATUS_W}} {iid:<{ID_W}}")
 
     def _parse_common_options(self, key=None, **kwargs):
         if key is not None:
@@ -1280,6 +1388,18 @@ def main(argv):
     subparsers.add_parser("types")
     subparsers.add_parser("down")
     subparsers.add_parser("up")
+
+    images_parser = subparsers.add_parser("images")
+    images_parser.add_argument(
+        "-n", "--name", dest="name", help="Search pattern (regex) for image name or ID"
+    )
+    images_parser.add_argument(
+        "--status",
+        dest="status",
+        default="available",
+        help="Filter by image status (default: available)",
+    )
+
     kwargs = vars(parser.parse_args())
 
     if kwargs.pop("verbose"):
