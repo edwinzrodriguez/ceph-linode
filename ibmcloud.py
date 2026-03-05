@@ -247,7 +247,13 @@ class CephIbmCloud:
 
     @property
     def ssh_user(self):
-        return self.cluster.get("ssh_user", "root")
+        # Default to 'ubuntu' for Ubuntu images, 'root' otherwise.
+        # This matches the expected default for common cloud images.
+        default_user = "root"
+        image_name = self.cluster.get("image", "").lower()
+        if "ubuntu" in image_name:
+            default_user = "ubuntu"
+        return self.cluster.get("ssh_user", default_user)
 
     @property
     def ssh_priv_keyfile(self):
@@ -266,7 +272,7 @@ class CephIbmCloud:
         if not key_name:
             raise RuntimeError("cluster.json must include ssh_key")
 
-        keys = self._list_all(self.client.list_keys, "keys")
+        keys = self.client.list_keys().get_result().get("keys", [])
         for key in keys:
             if key_name in (key.get("id"), key.get("name")):
                 self._ssh_key = key
