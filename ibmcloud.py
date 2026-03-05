@@ -641,12 +641,34 @@ class CephIbmCloud:
             root_size = machine.get("root_size")
             if root_size and not is_bare_metal:
                 capacity_gb = max(1, int(math.ceil(root_size / 1024)))
+                # To specify a custom boot volume size, we use boot_volume_attachment.
+                # According to the IBM Cloud VPC API documentation and SDK:
+                # 1. Provide 'boot_volume_attachment' with 'volume' containing 'capacity' and 'profile'.
+                # 2. Provide the 'image' at the top level of the instance prototype.
+                # 3. DO NOT provide 'image' inside the 'volume' object when image is at the top level.
+
+                # "volume_attachments": [],
+                # "boot_volume_attachment": {
+                #     "volume": {
+                #         "name": "ezr-test-boot-1772538104000",
+                #         "capacity": 250,
+                #         "profile": {
+                #             "name": "general-purpose"
+                #         },
+                #         "user_tags": []
+                #     },
+                #     "delete_volume_on_instance_delete": true
+                # },
+
+                boot_volume_name = f"{label}-boot-{int(time.time() * 1000)}"
+                instance_prototype["volume_attachments"] = []
                 instance_prototype["boot_volume_attachment"] = {
                     "delete_volume_on_instance_delete": True,
                     "volume": {
-                        "name": f"{label}-boot",
+                        "name": boot_volume_name,
                         "capacity": capacity_gb,
                         "profile": {"name": "general-purpose"},
+                        "user_tags": [],
                     },
                 }
 
