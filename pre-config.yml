@@ -60,25 +60,18 @@
           rm -f /etc/yum.repos.d/centos.repo /etc/yum.repos.d/centos-addons.repo
           # Download official repos and keys
           # Note: We use --force and --nodeps to ensure we overwrite the broken ones even if dnf is in a weird state
-          rpm -ivh --force --nodeps https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
-                                     https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm
+          MAJOR="{{ ansible_distribution_major_version }}"
+          URL="https://mirror.stream.centos.org/${MAJOR}-stream/BaseOS/x86_64/os/Packages/"
+          REPO_PKG=$(curl -s $URL | grep -oE "centos-stream-repos-${MAJOR}\.[0-9]-[0-9]+\.el${MAJOR}\.noarch\.rpm" | tail -1)
+          GPG_PKG=$(curl -s $URL | grep -oE "centos-gpg-keys-${MAJOR}\.[0-9]-[0-9]+\.el${MAJOR}\.noarch\.rpm" | tail -1)
+          if [ -n "$REPO_PKG" ] && [ -n "$GPG_PKG" ]; then
+            rpm -ivh --force --nodeps ${URL}${REPO_PKG} ${URL}${GPG_PKG}
+          else
+            echo "Failed to find repo or GPG packages for CentOS Stream ${MAJOR}"
+            exit 1
+          fi
         fi
-    when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int == 9
-    ignore_errors: yes
-
-  - name: Fix broken CentOS Stream repositories mirror
-    ansible.builtin.shell:
-      cmd: |
-        if grep -q "http://mirrors.adn.networklayer.com" /etc/yum.repos.d/centos.repo; then
-          echo "Detected problematic mirror. Reinstalling centos-stream-repos and centos-gpg-keys..."
-          # Remove broken repo files before reinstalling
-          rm -f /etc/yum.repos.d/centos.repo /etc/yum.repos.d/centos-addons.repo
-          # Download official repos and keys
-          # Note: We use --force and --nodeps to ensure we overwrite the broken ones even if dnf is in a weird state
-          rpm -ivh --force --nodeps https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/centos-stream-repos-10.0-19.el10.noarch.rpm \
-                                     https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/Packages/centos-gpg-keys-10.0-19.el10.noarch.rpm
-        fi
-    when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int == 10
+    when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int >= 9
     ignore_errors: yes
 
   # coredump capture setup
