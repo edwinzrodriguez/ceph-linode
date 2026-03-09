@@ -58,6 +58,9 @@ class CephFSPerfTest:
             self.fs_names = [self.fs_name] + [f"{self.fs_name}_{i:02d}" for i in range(2, self.num_filesystems + 1)]
         else:
             self.fs_names = [self.fs_name]
+        
+        # Cache for lockstat.py existence per host
+        self.lockstat_exists = {}
 
     def expand_vars(self, value):
         if not isinstance(value, str):
@@ -290,6 +293,8 @@ class CephFSPerfTest:
             
             if active:
                 print(f"Filesystem {fs} is now active.")
+                if self.config.get('specstorage', {}).get('lockstat', {}).get('enabled', False):
+                    self.start_lockstat(fs)
             else:
                 print(f"Warning: Timeout waiting for filesystem {fs} to become active.")
 
@@ -358,6 +363,7 @@ class CephFSPerfTest:
             'extra_container_args': [
                 "--privileged",
                 "--cap-add", "SYS_MODULE",
+                "-e", "ENABLE_LOCKSTAT=true",
                 "-v", "/sys/kernel/debug:/sys/kernel/debug:rw",
                 "-v", "/usr/src/kernels:/usr/src/kernels:ro",
                 "-v", "/usr/lib/modules:/usr/lib/modules:ro",
@@ -520,12 +526,19 @@ class CephFSPerfTest:
 
             if "Starting RUN phase" in line:
                 run_phase_started = True
+                if self.config.get('specstorage', {}).get('lockstat', {}).get('enabled', False):
+                    print(f"Resetting lockstat for Load Point {current_loadpoint}...")
+                    self.reset_lockstat()
                 if self.config.get('logging', {}).get('enabled', False) and not logging_triggered_for_current_lp:
                     print(f"Triggering MDS logging for Load Point {current_loadpoint}...")
                     self.start_mds_logging(current_loadpoint)
                     logging_triggered_for_current_lp = True
 
             if "Tests finished" in line:
+                if self.config.get('specstorage', {}).get('lockstat', {}).get('enabled', False):
+                    print(f"Dumping lockstat for Load Point {current_loadpoint}...")
+                    results_dir = payload.get('results_dir')
+                    self.dump_lockstat(current_loadpoint, results_dir)
                 if logging_triggered_for_current_lp:
                     print(f"Stopping MDS logging for Load Point {current_loadpoint}...")
                     results_dir = payload.get('results_dir')
@@ -680,6 +693,74 @@ class CephFSPerfTest:
                 except Exception as e:
                     print(f"Error collecting logs from {server_name}: {e}")
 
+    def start_lockstat(self, fs):
+        lockstat_cfg = self.config.get('specstorage', {}).get('lockstat', {})
+        lockstat_path = lockstat_cfg.get('path', '/usr/local/bin/lockstat.py')
+        threshold = lockstat_cfg.get('threshold', 0)
+        
+        for server_name in self.mdss:
+            # Check if lockstat.py exists once per host
+            if server_name not in self.lockstat_exists:
+                check = self.run_remote(server_name, f"test -f {lockstat_path} && echo EXISTS || echo MISSING").strip()
+                self.lockstat_exists[server_name] = (check == "EXISTS")
+
+            if self.lockstat_exists[server_name]:
+                print(f"[{server_name}] Starting lockstat for mds.{fs} with threshold {threshold}")
+                self.run_remote(server_name, f"sudo python3 {lockstat_path} mds.{fs} start --threshold {threshold}")
+            else:
+                print(f"[{server_name}] lockstat.py not found at {lockstat_path}, skipping start")
+
+    def stop_lockstat(self, fs):
+        lockstat_cfg = self.config.get('specstorage', {}).get('lockstat', {})
+        lockstat_path = lockstat_cfg.get('path', '/usr/local/bin/lockstat.py')
+        
+        for server_name in self.mdss:
+            if self.lockstat_exists.get(server_name):
+                print(f"[{server_name}] Stopping lockstat for mds.{fs}")
+                self.run_remote(server_name, f"sudo python3 {lockstat_path} mds.{fs} stop")
+
+    def reset_lockstat(self):
+        lockstat_cfg = self.config.get('specstorage', {}).get('lockstat', {})
+        lockstat_path = lockstat_cfg.get('path', '/usr/local/bin/lockstat.py')
+        
+        for fs in self.fs_names:
+            for server_name in self.mdss:
+                if self.lockstat_exists.get(server_name):
+                    print(f"[{server_name}] Resetting lockstat for mds.{fs}")
+                    self.run_remote(server_name, f"sudo python3 {lockstat_path} mds.{fs} reset")
+
+    def dump_lockstat(self, loadpoint, results_dir=None):
+        lockstat_cfg = self.config.get('specstorage', {}).get('lockstat', {})
+        lockstat_path = lockstat_cfg.get('path', '/usr/local/bin/lockstat.py')
+        
+        for fs in self.fs_names:
+            for server_name in self.mdss:
+                if self.lockstat_exists.get(server_name):
+                    lp_tag = f"{int(loadpoint):02d}"
+                    print(f"[{server_name}] Dumping lockstat for mds.{fs} (Load Point {loadpoint})")
+                    # output = self.run_remote(server_name, f"sudo python3 {lockstat_path} mds.{fs} dump --detail")
+                    
+                    if results_dir:
+                        dest_file = f"{server_name}_lp{lp_tag}_mds.{fs}_lockstat_dump.txt"
+                        temp_file = f"/tmp/{dest_file}"
+                        
+                        # Write output to temp file on server
+                        # We use base64 to avoid issues with shell escaping and large outputs if needed, 
+                        # but simple echo might be enough if we don't have binary data.
+                        # Actually, better to just redirect in the command.
+                        self.run_remote(server_name, f"sudo python3 {lockstat_path} mds.{fs} dump --detail | sudo tee {temp_file} > /dev/null")
+                        
+                        user, _, _ = self.get_ssh_details(server_name)
+                        self.run_remote(server_name, f"sudo chown {user}:{user} {temp_file}")
+                        
+                        # Transfer to admin
+                        admin_user, admin_host, admin_port = self.get_ssh_details(self.admin)
+                        copy_cmd = f"scp -o StrictHostKeyChecking=no -P {admin_port} {temp_file} {admin_user}@{admin_host}:{results_dir}/"
+                        self.run_remote(server_name, copy_cmd)
+                        
+                        # Cleanup
+                        self.run_remote(server_name, f"rm -f {temp_file}")
+
     def parse_si_unit(self, value):
         if not isinstance(value, str):
             return value
@@ -777,6 +858,11 @@ class CephFSPerfTest:
             self.run_workload(current_settings, shared_timestamp)
             
             self.unmount_clients()
+        
+        # Stop lockstat collection at the end of the test matrix run
+        if self.config.get('specstorage', {}).get('lockstat', {}).get('enabled', False):
+            for fs in self.fs_names:
+                self.stop_lockstat(fs)
 
 def main():
     if len(sys.argv) < 3:

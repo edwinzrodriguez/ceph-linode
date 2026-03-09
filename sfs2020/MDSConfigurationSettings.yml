@@ -18,10 +18,13 @@ specstorage:
   perf_record_script: "/sfs2020/perf_record.py"
   perf_record_executable: "ceph-mds"
   perf_record_duration: 5
-  perf_record_flamegraph_path: "/sfs2020/FlameGraph"
+  lockstat:
+    enabled: true
+    path: "/usr/local/bin/lockstat.py"
+    threshold: 0
 
 logging:
-  enabled: true
+  enabled: false
   debug_mds: 5
   debug_ms: 1
 
