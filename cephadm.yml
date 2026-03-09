@@ -19,6 +19,35 @@
 - name: wipe OSDs
   import_playbook: playbooks/wipe-osds.yml
 
+- hosts: all
+  become: yes
+  tasks:
+  - name: check for local docker config
+    delegate_to: localhost
+    become: no
+    run_once: true
+    stat:
+      path: ~/.docker/config.json
+    register: local_docker_config
+
+  - name: ensure .docker directory exists
+    file:
+      path: "{{ ssh_user_home }}/.docker"
+      state: directory
+      owner: root
+      group: root
+      mode: '0700'
+    when: local_docker_config.stat.exists
+
+  - name: copy docker config
+    copy:
+      src: ~/.docker/config.json
+      dest: "{{ ssh_user_home }}/.docker/config.json"
+      owner: root
+      group: root
+      mode: '0600'
+    when: local_docker_config.stat.exists
+
 - hosts: mons mgrs osds mdss grafana-servers clients
   become: yes
   tasks:
