@@ -156,6 +156,20 @@
       ansible.builtin.shell:
         cmd: |
           dnf install -y epel-release
+          # Exclude conflicting packages from EPEL
+          if [ -f /etc/yum.repos.d/epel.repo ]; then
+            # Clean up existing exclude lines from the [epel] section to avoid DuplicateOptionError
+            sed -i '/^\[epel\]/,/^\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel.repo
+            # Add the exclude line after [epel] section header
+            sed -i '/^\[epel\]/a exclude=python3-grpcio*,grpc-data*,re2*,parquet-libs*,libarrow*,thrift*' /etc/yum.repos.d/epel.repo
+          fi
+          if [ -f /etc/yum.repos.d/epel-next.repo ]; then
+            # Clean up existing exclude lines from the [epel-next] section
+            sed -i '/^\[epel-next\]/,/^\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel-next.repo
+            # Add the exclude line after [epel-next] section header
+            sed -i '/^\[epel-next\]/a exclude=python3-grpcio*,grpc-data*,re2*,parquet-libs*,libarrow*,thrift*' /etc/yum.repos.d/epel-next.repo
+          fi
+
           if [ "{{ ansible_distribution }}" = "RedHat" ]; then
             dnf config-manager --set-enabled codeready-builder-for-rhel-{{ ansible_distribution_major_version }}-x86_64-rpms
           else

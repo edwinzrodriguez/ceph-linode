@@ -138,6 +138,11 @@
       update_cache: yes
     when: ansible_distribution_major_version | int >= 10
 
+  - name: clean up epel repo exclude (avoid DuplicateOptionError)
+    shell: "sed -i '/^\\[epel\\]/,/^\\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel.repo"
+    ignore_errors: yes
+    when: ansible_distribution_major_version | int >= 9
+
   - name: enable epel repo
     yum_repository:
       name: epel
@@ -146,7 +151,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*' if ansible_distribution_major_version | int >= 10 else '' }}"
+      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*,thrift*' if ansible_distribution_major_version | int >= 9 else '' }}"
       state: present
 
   - name: Add IBM Storage Ceph repository (RHEL/CentOS 9/10)
@@ -182,6 +187,11 @@
       mode: '0644'
     when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
+  - name: clean up epel-next repo exclude (avoid DuplicateOptionError)
+    shell: "sed -i '/^\\[epel-next\\]/,/^\\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel-next.repo"
+    ignore_errors: yes
+    when: ansible_distribution_major_version | int >= 9
+
   - name: enable epel-next repo (if available)
     yum_repository:
       name: epel-next
@@ -190,7 +200,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*' if ansible_distribution_major_version | int >= 10 else '' }}"
+      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*,thrift*' if ansible_distribution_major_version | int >= 9 else '' }}"
       state: present
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
@@ -270,7 +280,7 @@
     copy: src=ceph-mon.logrotate dest=/etc/logrotate.d/ceph owner=root group=root mode=644
     when: ceph_mon_logrotate.stat.exists
 
-- hosts: clients
+- hosts: clients ganeshas
   become: yes
   tasks:
   - name: install nfs-utils
