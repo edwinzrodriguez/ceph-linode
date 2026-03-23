@@ -65,10 +65,10 @@
         state: latest
       when: ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat'
 
-    - name: Autoremove unneeded packages installed as dependencies
-      ansible.builtin.dnf:
-        autoremove: yes
-      when: ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat'
+#    - name: Autoremove unneeded packages installed as dependencies
+#      ansible.builtin.dnf:
+#        autoremove: yes
+#      when: ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat'
 
     - name: Install systemtap and related packages
       ansible.builtin.dnf:
