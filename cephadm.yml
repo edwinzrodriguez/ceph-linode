@@ -48,7 +48,7 @@
       mode: '0600'
     when: local_docker_config.stat.exists
 
-- hosts: mons mgrs osds mdss grafana-servers clients
+- hosts: mons mgrs osds mdss grafana-servers clients ganeshas
   become: yes
   tasks:
   - name: setup bootstrap monitor ssh key
@@ -70,9 +70,6 @@
       path: "/root/.ssh/authorized_keys"
       line: "{{ cephadm_key.public_key }}"
 
-- hosts: mons
-  become: yes
-  tasks:
   - name: read cephadm private key from bootstrap monitor
     slurp:
       src: "{{ ssh_user_home }}/.ssh/id_ed25519"
@@ -87,7 +84,7 @@
     run_once: true
     register: cephadm_pub_key_b64
 
-  - name: distribute cephadm private key to mons
+  - name: distribute cephadm private key to hosts
     copy:
       dest: "{{ ssh_user_home }}/.ssh/id_ed25519"
       content: "{{ cephadm_priv_key_b64.content | b64decode }}"
@@ -96,7 +93,7 @@
       mode: '0600'
     when: inventory_hostname != groups['mons'][0]
 
-  - name: distribute cephadm public key to mons
+  - name: distribute cephadm public key to hosts
     copy:
       dest: "{{ ssh_user_home }}/.ssh/id_ed25519.pub"
       content: "{{ cephadm_pub_key_b64.content | b64decode }}"
@@ -107,14 +104,14 @@
 
   - name: gather host keys by IP
     shell: "ssh-keyscan -T 5 -H -t rsa,ecdsa,ed25519 {{ hostvars[item].ansible_ssh_host | default(item) }} 2>/dev/null || true"
-    loop: "{{ groups['mons'] + groups['mgrs'] + groups['osds'] + groups['mdss'] + groups['clients'] | unique }}"
+    loop: "{{ groups['mons'] + groups['mgrs'] + groups['osds'] + groups['mdss'] + groups['clients'] + groups.get('ganeshas', []) | unique }}"
     register: scan_ip
     changed_when: false
     failed_when: false
 
   - name: gather host keys by hostname
     shell: "ssh-keyscan -T 5 -H -t rsa,ecdsa,ed25519 {{ item }} 2>/dev/null || true"
-    loop: "{{ groups['mons'] + groups['mgrs'] + groups['osds'] + groups['mdss'] + groups['clients'] | unique }}"
+    loop: "{{ groups['mons'] + groups['mgrs'] + groups['osds'] + groups['mdss'] + groups['clients'] + groups.get('ganeshas', []) | unique }}"
     register: scan_host
     changed_when: false
     failed_when: false
@@ -135,7 +132,7 @@
           )
         }}
 
-  - name: update known_hosts on mons
+  - name: update known_hosts on all hosts
     known_hosts:
       name: "{{ item.split()[0] }}"
       key: "{{ item }}"
@@ -143,7 +140,7 @@
       state: present
     loop: "{{ combined_known_host_lines }}"
 
-- hosts: mons mgrs osds mdss clients
+- hosts: mons mgrs osds mdss clients ganeshas
   become: yes
   tasks:
 
@@ -232,7 +229,7 @@
         {% set host_list = [] %}
         {% set labels_by_host = {} %}
 
-        {% for g in ['mons', 'osds', 'mdss', 'mgrs', 'clients'] %}
+        {% for g in ['mons', 'osds', 'mdss', 'mgrs', 'clients', 'ganeshas'] %}
         {%   for h in groups.get(g, []) %}
         {%     if h not in host_list %}
         {%       set _ = host_list.append(h) %}
