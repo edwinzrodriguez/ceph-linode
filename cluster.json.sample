@@ -38,6 +38,11 @@
       },
       {
         "count": 1,
+        "prefix": "ganesha",
+        "group": "ganeshas"
+      },
+      {
+        "count": 1,
         "prefix": "client",
         "group": "clients",
         "type": 1024
