@@ -1,5 +1,7 @@
 ssh_user: root
 ssh_user_home: /root
+#ssh_user: "{{ 'ubuntu' if ansible_distribution == 'Ubuntu' else 'vpcuser' }}"
+#ssh_user_home: "{{ '/home/ubuntu' if ansible_distribution == 'Ubuntu' else '/home/vpcuser' }}"
 # RELEASE must be a tagged version or release branch to pull cephadm from, probably just use the latest release, not main!
 RELEASE: tentacle
 # CEPHADM_REPO is the branch to actually deploy

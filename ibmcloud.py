@@ -20,9 +20,11 @@ import logging
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 import requests
+import yaml
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from threading import BoundedSemaphore
@@ -242,18 +244,31 @@ class CephIbmCloud:
             sys.exit(1)
 
     @property
+    def all_yml(self):
+        all_vars_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'group_vars', 'all.yml')
+        if os.path.exists(all_vars_path):
+            with open(all_vars_path, 'r') as f:
+                return yaml.safe_load(f) or {}
+        return {}
+
+    @property
     def ssh_user_home(self):
-        return self.cluster.get("ssh_user_home", os.getenv("HOME"))
+        return self.cluster.get("cluster_ssh_user_home", self.cluster.get("ssh_user_home", os.getenv("HOME")))
 
     @property
     def ssh_user(self):
-        # Default to 'ubuntu' for Ubuntu images, 'root' otherwise.
+        # Default to 'vpcuser' for RedHat-like images, 'ubuntu' for Ubuntu-like.
         # This matches the expected default for common cloud images.
-        default_user = "root"
         image_name = self.cluster.get("image", "").lower()
         if "ubuntu" in image_name:
             default_user = "ubuntu"
-        return self.cluster.get("ssh_user", default_user)
+        else:
+            default_user = "vpcuser"
+        return self.cluster.get("cluster_ssh_user", self.cluster.get("ssh_user", default_user))
+
+    @property
+    def ansible_ssh_user(self):
+        return self.all_yml.get("ssh_user", self.ssh_user)
 
     @property
     def ssh_priv_keyfile(self):
@@ -829,6 +844,57 @@ class CephIbmCloud:
             logging.exception(e)
             os._exit(1)
 
+    def _ensure_root_authorized_keys(self, instance):
+        public_ip = self._instance_public_ip(instance)
+        default_user = self.ssh_user
+        if default_user == "root":
+            return
+
+        # Check if root is already accessible
+        ssh_check_cmd = [
+            "ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5", "-i", self.ssh_priv_keyfile,
+            f"root@{public_ip}", "true"
+        ]
+        
+        # We don't necessarily need to retry this check as much as the copy_cmd, 
+        # but the copy_cmd below will definitely need retries.
+        if subprocess.run(ssh_check_cmd, capture_output=True).returncode == 0:
+            logging.info(f"{instance.get('name')}: root already has authorized_keys")
+            return
+
+        logging.info(f"{instance.get('name')}: copying authorized_keys to root from {default_user}")
+        
+        # Copy authorized_keys from default_user to root
+        copy_cmd = (
+            f"sudo mkdir -p /root/.ssh && "
+            f"sudo cp /home/{default_user}/.ssh/authorized_keys /root/.ssh/authorized_keys && "
+            f"sudo chown root:root /root/.ssh/authorized_keys && "
+            f"sudo chmod 0600 /root/.ssh/authorized_keys"
+        )
+        
+        ssh_exec_cmd = [
+            "ssh", "-o", "StrictHostKeyChecking=no", "-i", self.ssh_priv_keyfile,
+            f"{default_user}@{public_ip}", copy_cmd
+        ]
+        
+        max_tries = 12 # ~1 minute
+        for i in range(max_tries):
+            res = subprocess.run(ssh_exec_cmd, capture_output=True, text=True)
+            if res.returncode == 0:
+                logging.info(f"{instance.get('name')}: successfully copied authorized_keys to root")
+                return
+            
+            # Check for connection refused
+            if "Connection refused" in res.stderr:
+                if i < max_tries - 1:
+                    logging.warning(f"{instance.get('name')}: connection refused to {default_user}@{public_ip}, retrying in 5 seconds...")
+                    time.sleep(5)
+                    continue
+            
+            logging.error(f"{instance.get('name')}: failed to copy authorized_keys to root (returncode={res.returncode}): {res.stderr}")
+            break
+
     def launch(self, **kwargs):
         logging.info(f"launch {kwargs}")
         self._parse_common_options(**kwargs)
@@ -847,6 +913,10 @@ class CephIbmCloud:
                         time.sleep(10)
 
         logging.info(f"launch results: {[f.result() for f in running]}")
+
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            for future in running:
+                executor.submit(self._ensure_root_authorized_keys, future.result())
 
         ibm_nodes = []
         with open("ansible_inventory", mode="w") as f:
@@ -895,7 +965,7 @@ class CephIbmCloud:
                         f.write(
                             f"\t{ibmnode.get('name')} "
                             f"ansible_ssh_host={public_ip} ansible_ssh_port=22 "
-                            f"ansible_ssh_user='{self.ssh_user}' "
+                            f"ansible_ssh_user='{self.ansible_ssh_user}' "
                             f"ansible_ssh_private_key_file='{self.ssh_user_home}/.ssh/id_rsa' "
                             f"ceph_group='{group}' "
                             f"public_network='{public_network_cidr}' "
@@ -912,7 +982,7 @@ class CephIbmCloud:
                             "ip_public": public_ip,
                             "group": self.group,
                             "ceph_group": group,
-                            "user": self.ssh_user,
+                            "user": self.ansible_ssh_user,
                             "key": self.ssh_user_home + "/.ssh/id_rsa",
                         }
                         ibm_nodes.append(l)
