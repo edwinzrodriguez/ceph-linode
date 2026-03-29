@@ -188,7 +188,7 @@
     when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
 
   - name: clean up epel-next repo exclude (avoid DuplicateOptionError)
-    shell: "sed -i '/^\\[epel-next\\]/,/^\\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel-next.repo"
+    shell: "if [ -f /etc/yum.repos.d/epel-next.repo ]; then sed -i '/^\\[epel-next\\]/,/^\\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel-next.repo; fi"
     ignore_errors: yes
     when: ansible_distribution_major_version | int >= 9
 
