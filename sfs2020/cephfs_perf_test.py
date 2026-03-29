@@ -330,11 +330,14 @@ class CephFSPerfTest:
     def provision_ganesha(self):
         print("Provisioning NFS-Ganesha service...")
         svc_id = self.config['ganesha'].get('service_id', 'ganesha')
-        # Apply NFS service spec targeting the 'ganeshas' label
-        # In cephadm.yml we already added 'ganeshas' label to those hosts
-        # and configured it to mount a custom /etc/ganesha/ganesha.conf
-        # We explicitly specify port 2049 to ensure it's mapped to the host
-        self.run_remote(self.admin, f"sudo ceph orch apply nfs {svc_id} --placement='label:ganeshas' --port=2049")
+        
+        # Setup custom ganesha config on ganesha nodes
+        self.setup_ganesha_config()
+        
+        # Generate and apply NFS service spec
+        self.generate_ganesha_yaml(svc_id, self.ganeshas)
+        ganesha_yaml = self.config.get('ganesha_yaml_path', '/sfs2020/ganesha.yaml')
+        self.run_remote(self.admin, f"sudo ceph orch apply -i {ganesha_yaml}")
         
         # Wait for NFS service to be active
         print(f"Waiting for NFS service {svc_id} to be active...")
@@ -481,6 +484,78 @@ class CephFSPerfTest:
         if self.config['mds_yaml_path'] != local_mds_yaml:
              user, host, port = self.get_ssh_details(self.admin)
              subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, local_mds_yaml, f"{user}@{host}:{self.config['mds_yaml_path']}"])
+
+    def generate_ganesha_yaml(self, svc_id, selected_hosts):
+        print(f"Generating ganesha.yaml for {svc_id}...")
+        
+        ganesha_spec = {
+            'service_type': 'nfs',
+            'service_id': svc_id,
+            'placement': {
+                'hosts': selected_hosts
+            },
+            'spec': {
+                'port': 2049
+            },
+            'extra_container_args': [
+                "-v", "/etc/ceph:/etc/ceph:z",
+                "-v", "/etc/ceph/ganesha-custom.conf:/etc/ganesha/custom.conf:z",
+                "--env", "GSS_USE_HOSTNAME=0",
+                "--env", "CEPH_CONF=/etc/ceph/ceph.conf",
+                "--entrypoint", "/usr/bin/ganesha.nfsd"
+            ],
+            'extra_entrypoint_args': [
+                "-F", "-L", "STDERR", "-N", "NIV_EVENT",
+                "-f", "/etc/ganesha/custom.conf"
+            ]
+        }
+
+        local_ganesha_yaml = "ganesha.yaml"
+        with open(local_ganesha_yaml, 'w') as f:
+            yaml.dump(ganesha_spec, f)
+        
+        ganesha_yaml_path = self.config.get('ganesha_yaml_path', '/sfs2020/ganesha.yaml')
+        user, host, port = self.get_ssh_details(self.admin)
+        subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, local_ganesha_yaml, f"{user}@{host}:{ganesha_yaml_path}"])
+
+    def setup_ganesha_config(self):
+        print("Setting up custom Ganesha configuration on ganesha nodes...")
+        config_content = (
+            "NFS_Core_Param {\n"
+            "    Protocols = 4;\n"
+            "    Enable_NLM = false;\n"
+            "    Enable_RQUOTA = false;\n"
+            "    NFS_Port = 2049;\n"
+            "}\n"
+            "NFSv4 {\n"
+            "    RecoveryBackend = \"rados_cluster\";\n"
+            "    Minor_Versions = 1, 2;\n"
+            "}\n"
+            "RADOS_KV {\n"
+            "    nodeid = 0;\n"
+            "    pool = \".nfs\";\n"
+            "    namespace = \"ganesha\";\n"
+            "    UserId = \"admin\";\n"
+            "}\n"
+            "RADOS_URLS {\n"
+            "    UserId = \"admin\";\n"
+            "    watch_url = \"rados://.nfs/ganesha/conf-nfs.ganesha\";\n"
+            "}\n"
+            "# Cephadm will still manage exports via the %url include\n"
+            "# but we use our custom global settings\n"
+            "%url rados://.nfs/ganesha/conf-nfs.ganesha\n"
+        )
+        
+        for host_name in self.ganeshas:
+            # Create /etc/ceph if it doesn't exist
+            self.run_remote(host_name, "sudo mkdir -p /etc/ceph")
+            
+            # Using printf to write the config file
+            # We need to escape single quotes and other shell-sensitive characters
+            escaped_config = config_content.replace("'", "'\\''")
+            cmd = f"printf '{escaped_config}' | sudo tee /etc/ceph/ganesha-custom.conf > /dev/null"
+            self.run_remote(host_name, cmd)
+            self.run_remote(host_name, "sudo chmod 0644 /etc/ceph/ganesha-custom.conf")
 
     def apply_mds_settings(self, settings):
         print("Applying MDS performance settings...")
