@@ -969,7 +969,8 @@ class CephIbmCloud:
                             f"ansible_ssh_private_key_file='{self.ssh_user_home}/.ssh/id_rsa' "
                             f"ceph_group='{group}' "
                             f"public_network='{public_network_cidr}' "
-                            f"cluster_network='{cluster_network_cidr}'"
+                            f"cluster_network='{cluster_network_cidr}' "
+                            f"private_ip='{private_ip}'"
                         )
                         if group == "mons":
                             f.write(f" monitor_address={private_ip}")
