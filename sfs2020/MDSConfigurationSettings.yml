@@ -23,6 +23,10 @@ specstorage:
     path: "/usr/local/bin/lockstat.py"
     threshold: 0
 
+ganesha:
+  enabled: true
+  service_id: "ganesha"
+
 logging:
   enabled: false
   debug_mds: 5

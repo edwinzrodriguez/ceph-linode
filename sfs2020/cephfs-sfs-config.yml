@@ -87,7 +87,9 @@
 
     - name: Run stap-prep
       ansible.builtin.shell:
-        cmd: stap-prep --enablerepo="{{ debuginfo_repo_name }},{{ crb_debuginfo_repo_name }}"
+        cmd: "stap-prep"
+      environment:
+        STAP_REPO_OPTIONS: "--enablerepo={{ debuginfo_repo_name }},{{ crb_debuginfo_repo_name }}"
       ignore_errors: yes
       when: ansible_distribution_major_version | int >= 10
 
@@ -134,9 +136,12 @@
         name: "sysstat"
         state: latest
 
-    - name: Install net-tools
+    - name: Install network tools
       ansible.builtin.dnf:
-        name: "net-tools"
+        name:
+          - net-tools
+          - telnet
+          - lsof
         state: latest
 
     - name: Install perl-open.noarch
@@ -149,7 +154,7 @@
         name: "tuned"
         state: latest
 
-- hosts: mons osds mdss clients
+- hosts: mons osds mdss clients ganeshas
   become: true
   tasks:
     - name: Ensure EPEL and CRB are enabled

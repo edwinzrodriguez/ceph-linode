@@ -51,6 +51,7 @@ class CephFSPerfTest:
         # Servers are typically OSDs.
         self.servers = [h['name'] for h in self.hosts_meta.get('osds', [])]
         self.clients = [h['name'] for h in self.hosts_meta.get('clients', [])]
+        self.ganeshas = [h['name'] for h in self.hosts_meta.get('ganeshas', [])]
         
         self.fs_name = self.config['fs_name']
         self.num_filesystems = self.config.get('num_filesystems', 1)
@@ -163,19 +164,51 @@ class CephFSPerfTest:
                 print(f"Error on {host_name}: {result.stderr}")
             return result.stdout
 
+    def safe_json_load(self, raw_output, default=[]):
+        if not raw_output or not raw_output.strip():
+            return default
+        
+        # Ceph orch commands often return this when no services match
+        if "No services reported" in raw_output:
+            return default
+            
+        try:
+            return json.loads(raw_output)
+        except (json.JSONDecodeError, TypeError):
+            return default
+
     def unmount_clients(self):
-        print("Unmounting CephFS on clients...")
+        print("Unmounting CephFS/NFS on clients...")
         for client in self.clients:
-            # Find all ceph mounts and unmount them
-            self.run_remote(client, "sudo umount -a -t ceph || true")
-            # Cleanup mount points
-            self.run_remote(client, "sudo rm -rf /mnt/cephfs_*")
+            self.unmount_path_pattern(client, "/mnt/cephfs_")
+
+    def unmount_path_pattern(self, host_name, pattern):
+        """Unmounts all mounts on a host that match the given path pattern."""
+        # Find all mount points matching the pattern from /proc/mounts
+        # Using awk to extract the second field (mount point) and filtering by prefix
+        cmd = f"awk '$2 ~ \"^{pattern}\" {{print $2}}' /proc/mounts | sort -r"
+        mount_points = self.run_remote(host_name, cmd).strip().splitlines()
+        
+        if not mount_points:
+            print(f"[{host_name}] No mount points found matching {pattern}")
+            return
+
+        for mnt in mount_points:
+            print(f"[{host_name}] Unmounting {mnt}...")
+            # Use lazy unmount (-l) if regular umount fails, or just regular umount
+            self.run_remote(host_name, f"sudo umount -f {mnt} || sudo umount -l {mnt} || true")
+        
+        # Cleanup mount points
+        self.run_remote(host_name, f"sudo rm -rf {pattern}*")
 
     def rebuild_filesystem(self, current_settings):
         # Enable pool deletion once
         self.run_remote(self.admin, "sudo ceph config set mon mon_allow_pool_delete true")
         # Increase max PGs per OSD to avoid ERANGE errors with multiple filesystems
         self.run_remote(self.admin, "sudo ceph config set global mon_max_pg_per_osd 1000")
+
+        if self.config.get('ganesha', {}).get('enabled', False):
+            self.cleanup_ganesha()
 
         for fs in self.fs_names:
             print(f"Deleting and recreating filesystem: {fs}")
@@ -187,17 +220,14 @@ class CephFSPerfTest:
             start_wait = time.time()
             while time.time() - start_wait < 120:
                 services = self.run_remote(self.admin, "sudo ceph orch ls --format json")
-                try:
-                    services_json = json.loads(services)
-                    found = False
-                    for svc in services_json:
-                        if svc.get('service_type') == 'mds' and svc.get('service_id') == fs:
-                            found = True
-                            break
-                    if not found:
+                services_json = self.safe_json_load(services)
+                found = False
+                for svc in services_json:
+                    if svc.get('service_type') == 'mds' and svc.get('service_id') == fs:
+                        found = True
                         break
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+                if not found:
+                    break
                 time.sleep(5)
 
             # Delete existing FS
@@ -208,20 +238,17 @@ class CephFSPerfTest:
             start_wait = time.time()
             while time.time() - start_wait < 60:
                 fs_dump = self.run_remote(self.admin, "sudo ceph fs dump --format json")
-                try:
-                    fs_dump_json = json.loads(fs_dump)
-                    filesystems = fs_dump_json.get('filesystems', [])
-                    found_active = False
-                    for fsys in filesystems:
-                        if fsys.get('mdsmap', {}).get('fs_name') == fs:
-                            up = fsys.get('mdsmap', {}).get('up', {})
-                            if up: # if up is not empty, it means there are still active/assigned MDS
-                                found_active = True
-                            break
-                    if not found_active:
+                fs_dump_json = self.safe_json_load(fs_dump, default={})
+                filesystems = fs_dump_json.get('filesystems', [])
+                found_active = False
+                for fsys in filesystems:
+                    if fsys.get('mdsmap', {}).get('fs_name') == fs:
+                        up = fsys.get('mdsmap', {}).get('up', {})
+                        if up: # if up is not empty, it means there are still active/assigned MDS
+                            found_active = True
                         break
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+                if not found_active:
+                    break
                 time.sleep(2)
 
             self.run_remote(self.admin, f"sudo ceph fs rm {fs} --yes-i-really-mean-it || true")
@@ -231,17 +258,14 @@ class CephFSPerfTest:
             start_wait = time.time()
             while time.time() - start_wait < 60:
                 fs_ls = self.run_remote(self.admin, "sudo ceph fs ls --format json")
-                try:
-                    fs_ls_json = json.loads(fs_ls)
-                    found = False
-                    for fsys in fs_ls_json:
-                        if fsys.get('name') == fs:
-                            found = True
-                            break
-                    if not found:
+                fs_ls_json = self.safe_json_load(fs_ls)
+                found = False
+                for fsys in fs_ls_json:
+                    if fsys.get('name') == fs:
+                        found = True
                         break
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+                if not found:
+                    break
                 time.sleep(2)
 
             # Delete existing pools
@@ -266,28 +290,25 @@ class CephFSPerfTest:
             active = False
             while time.time() - start_time < timeout:
                 status_raw = self.run_remote(self.admin, f"sudo ceph fs status {fs} --format json")
-                try:
-                    status = json.loads(status_raw)
-                    # For Ceph Reef+, 'mdsmap' usually contains the MDS info. 
-                    # We check if there's at least one MDS in 'active' state.
-                    mdsmap = status.get('mdsmap')
-                    # In some versions, 'mdsmap' is a dict with counts (e.g., {'up:active': N}).
-                    # In others, it's a list of MDS entries with a 'state' field.
-                    if isinstance(mdsmap, dict):
-                        if (mdsmap.get('up:active', 0) or mdsmap.get('active', 0)) > 0:
+                status = self.safe_json_load(status_raw, default={})
+                # For Ceph Reef+, 'mdsmap' usually contains the MDS info. 
+                # We check if there's at least one MDS in 'active' state.
+                mdsmap = status.get('mdsmap')
+                # In some versions, 'mdsmap' is a dict with counts (e.g., {'up:active': N}).
+                # In others, it's a list of MDS entries with a 'state' field.
+                if isinstance(mdsmap, dict):
+                    if (mdsmap.get('up:active', 0) or mdsmap.get('active', 0)) > 0:
+                        active = True
+                        break
+                elif isinstance(mdsmap, list):
+                    for entry in mdsmap:
+                        st = str(entry.get('state', '')).lower()
+                        # Accept 'active', 'up:active', or any state containing 'active'
+                        if st == 'active' or st.endswith('active') or 'active' in st:
                             active = True
                             break
-                    elif isinstance(mdsmap, list):
-                        for entry in mdsmap:
-                            st = str(entry.get('state', '')).lower()
-                            # Accept 'active', 'up:active', or any state containing 'active'
-                            if st == 'active' or st.endswith('active') or 'active' in st:
-                                active = True
-                                break
-                        if active:
-                            break
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+                    if active:
+                        break
                 
                 time.sleep(10)
             
@@ -300,8 +321,81 @@ class CephFSPerfTest:
 
             # Setup client auth for each FS
             self.setup_client_auth(fs)
+
+        if self.config.get('ganesha', {}).get('enabled', False):
+            self.provision_ganesha()
         
         self.distribute_keys_and_config()
+
+    def provision_ganesha(self):
+        print("Provisioning NFS-Ganesha service...")
+        svc_id = self.config['ganesha'].get('service_id', 'ganesha')
+        # Apply NFS service spec targeting the 'ganeshas' label
+        # In cephadm.yml we already added 'ganeshas' label to those hosts
+        # and configured it to mount a custom /etc/ganesha/ganesha.conf
+        # We explicitly specify port 2049 to ensure it's mapped to the host
+        self.run_remote(self.admin, f"sudo ceph orch apply nfs {svc_id} --placement='label:ganeshas' --port=2049")
+        
+        # Wait for NFS service to be active
+        print(f"Waiting for NFS service {svc_id} to be active...")
+        start_wait = time.time()
+        while time.time() - start_wait < 300:
+            services = self.run_remote(self.admin, "sudo ceph orch ls --service_type nfs --format json")
+            services_json = self.safe_json_load(services)
+            found_active = False
+            for svc in services_json:
+                if svc.get('service_id') == svc_id:
+                    # Check for 'running' count > 0
+                    if svc.get('status', {}).get('running', 0) > 0:
+                        found_active = True
+                        break
+            if found_active:
+                break
+            time.sleep(10)
+
+        for fs in self.fs_names:
+            export_path = f"/{fs}"
+            print(f"Creating NFS export for {fs} at {export_path}...")
+            # Create NFS export for CephFS
+            # Usage: ceph nfs export create cephfs <cluster_id> <pseudo_path> <fsname> [--path=/<path>] [--readonly]
+            self.run_remote(self.admin, f"sudo ceph nfs export create cephfs {svc_id} {export_path} {fs} --path=/")
+
+    def cleanup_ganesha(self):
+        print("Cleaning up NFS-Ganesha exports and service...")
+        svc_id = self.config['ganesha'].get('service_id', 'ganesha')
+        
+        # Remove all exports for this service
+        exports_raw = self.run_remote(self.admin, f"sudo ceph nfs export ls {svc_id} --format json")
+        exports = self.safe_json_load(exports_raw)
+        if exports:
+            for export_path in exports:
+                print(f"Removing NFS export {export_path} from {svc_id}...")
+                self.run_remote(self.admin, f"sudo ceph nfs export rm {svc_id} {export_path}")
+        else:
+            # If 'ceph nfs export ls' fails or returns non-json, try to remove by our known fs_names
+            for fs in self.fs_names:
+                export_path = f"/{fs}"
+                print(f"Attempting to remove NFS export {export_path} from {svc_id}...")
+                self.run_remote(self.admin, f"sudo ceph nfs export rm {svc_id} {export_path} || true")
+
+        # Remove the NFS service
+        print(f"Removing NFS service {svc_id}...")
+        self.run_remote(self.admin, f"sudo ceph orch rm nfs.{svc_id} || true")
+        
+        # Wait for NFS service to be removed
+        print(f"Waiting for NFS service {svc_id} to be removed...")
+        start_wait = time.time()
+        while time.time() - start_wait < 120:
+            services = self.run_remote(self.admin, "sudo ceph orch ls --service_type nfs --format json")
+            services_json = self.safe_json_load(services)
+            found = False
+            for svc in services_json:
+                if svc.get('service_id') == svc_id:
+                    found = True
+                    break
+            if not found:
+                break
+            time.sleep(5)
 
     def setup_client_auth(self, fs):
         print(f"Setting up client authorization for {fs}...")
@@ -312,21 +406,24 @@ class CephFSPerfTest:
         self.run_remote(self.admin, "sudo ceph auth get client.0 -o /etc/ceph/ceph.client.0.keyring")
 
     def distribute_keys_and_config(self):
-        print("Distributing keys and config to clients...")
+        print("Distributing keys and config to clients and ganeshas...")
         # Based on notes.txt:
         # scp /etc/ceph/ceph.conf /etc/ceph/ceph.client.0.keyring /etc/ceph/ceph.client.admin.keyring root@ceph-client:/etc/ceph/
         # Note: The code uses self.clients which are hostnames from inventory.
-        for client_name in self.clients:
+        target_hosts = self.clients + self.ganeshas
+        for host_name in target_hosts:
             # Create /etc/ceph if it doesn't exist
-            self.run_remote(client_name, "sudo mkdir -p /etc/ceph")
+            self.run_remote(host_name, "sudo mkdir -p /etc/ceph")
             
-            # Copy from admin to client. 
+            # Copy from admin to target. 
             # Since we are running on the orchestrator machine, we might need to go through admin or do it directly if we have access.
-            files = "/etc/ceph/ceph.conf /etc/ceph/ceph.client.0.keyring"
-            user, host, port = self.get_ssh_details(client_name)
-            scp_cmd = f"scp -o StrictHostKeyChecking=no -P {port} {files} {user}@{host}:/tmp/"
+            files = "/etc/ceph/ceph.conf /etc/ceph/ceph.client.0.keyring /etc/ceph/ceph.client.admin.keyring"
+            user, host, port = self.get_ssh_details(host_name)
+            # Use cp first on admin to ensure we have all files in one place if needed, 
+            # but scp directly from /etc/ceph should work if permissions allow.
+            scp_cmd = f"sudo scp -o StrictHostKeyChecking=no -P {port} {files} {user}@{host}:/tmp/"
             self.run_remote(self.admin, scp_cmd)
-            self.run_remote(client_name, "sudo mv /tmp/ceph.conf /tmp/ceph.client.0.keyring /etc/ceph/")
+            self.run_remote(host_name, "sudo mv /tmp/ceph.conf /tmp/ceph.client.0.keyring /tmp/ceph.client.admin.keyring /etc/ceph/ && sudo chmod 0600 /etc/ceph/*.keyring")
 
     def generate_mds_yaml(self, fs, count, current_settings=None):
         print(f"Generating mds.yaml for {fs} with count={count}...")
@@ -401,6 +498,10 @@ class CephFSPerfTest:
         self.run_remote(self.admin, f"sudo ceph fs set {fs} max_mds {num}")
 
     def kernel_mount(self):
+        if self.config.get('ganesha', {}).get('enabled', False):
+            self.nfs_mount()
+            return
+
         print("Mounting CephFS on clients via kernel...")
         mon_addrs = self.run_remote(self.admin, "sudo ceph mon dump | grep -oE 'v1:[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+:[0-9]+' | head -n 1 | sed 's/v1://'").strip()
         if mon_addrs.startswith("v1:"):
@@ -418,6 +519,42 @@ class CephFSPerfTest:
                     
                     self.run_remote(client_name, f"sudo mkdir -p {mount_path}")
                     mount_cmd = f"sudo mount -t ceph {mon_addrs}:/ {mount_path} -o name=0,secret={secret_key},fs={fs}"
+                    self.run_remote(client_name, mount_cmd)
+                    user, _, _ = self.get_ssh_details(client_name)
+                    self.run_remote(client_name, f"sudo chown {user}:{user} {mount_path}")
+
+    def nfs_mount(self):
+        print("Mounting CephFS on clients via NFS (Ganesha)...")
+        svc_id = self.config['ganesha'].get('service_id', 'ganesha')
+        
+        # Use first ganesha node as the server for all clients for simplicity, 
+        # or we could round-robin. 
+        if not self.ganeshas:
+            print("Error: No ganesha nodes found in inventory.")
+            return
+
+        mounts_per_fs = self.config['specstorage'].get('mounts_per_fs', 1)
+        
+        for fs in self.fs_names:
+            export_path = f"/{fs}"
+            for i, client_name in enumerate(self.clients):
+                # Pick a ganesha server - round robin across clients
+                ganesha_host = self.ganeshas[i % len(self.ganeshas)]
+                
+                # Prefer private_ip for mounting if available
+                meta = self.all_hosts.get(ganesha_host, {})
+                ganesha_target = meta.get('private_ip')
+                if not ganesha_target:
+                    _, ganesha_target, _ = self.get_ssh_details(ganesha_host)
+                
+                for mnt_idx in range(mounts_per_fs):
+                    mount_path = f"/mnt/cephfs_{fs}"
+                    if mounts_per_fs > 1:
+                        mount_path += f"_{mnt_idx:02d}"
+                    
+                    self.run_remote(client_name, f"sudo mkdir -p {mount_path}")
+                    # NFS mount command
+                    mount_cmd = f"sudo mount -t nfs -o nfsvers=4.1,proto=tcp {ganesha_target}:{export_path} {mount_path}"
                     self.run_remote(client_name, mount_cmd)
                     user, _, _ = self.get_ssh_details(client_name)
                     self.run_remote(client_name, f"sudo chown {user}:{user} {mount_path}")
@@ -664,34 +801,30 @@ class CephFSPerfTest:
                 # We need to find the specific MDS daemon(s) running on this server.
                 # 'ceph orch ps --hostname <server_name> --daemon_type mds'
                 ps_output = self.run_remote(self.admin, f"sudo ceph orch ps --hostname {server_name} --daemon_type mds --format json")
-                try:
-                    daemons = json.loads(ps_output)
-                    for daemon in daemons:
-                        daemon_name = daemon.get('daemon_name') # e.g. mds.perf_test_fs.ceph53.vjshxm
-                        if not daemon_name:
-                            continue
-                        
-                        src_log = f"{log_dir}/ceph-{daemon_name}.log"
-                        dest_log = f"{server_name}_lp{lp_tag}_{daemon_name}.log"
-                        
-                        # Copy and rename on the server first
-                        self.run_remote(server_name, f"sudo cp {src_log} /tmp/{dest_log}")
-                        user, _, _ = self.get_ssh_details(server_name)
-                        self.run_remote(server_name, f"sudo chown {user}:{user} /tmp/{dest_log}")
-                        
-                        # Transfer to admin
-                        admin_user, admin_host, admin_port = self.get_ssh_details(self.admin)
-                        copy_cmd = f"scp -o StrictHostKeyChecking=no -P {admin_port} /tmp/{dest_log} {admin_user}@{admin_host}:{results_dir}/"
-                        self.run_remote(server_name, copy_cmd)
-                        
-                        # Cleanup tmp
-                        self.run_remote(server_name, f"rm -f /tmp/{dest_log}")
-                        
-                        # Clear the original log file to avoid overlap for next loadpoint
-                        self.run_remote(server_name, f"sudo truncate -s 0 {src_log}")
-                        
-                except Exception as e:
-                    print(f"Error collecting logs from {server_name}: {e}")
+                daemons = self.safe_json_load(ps_output)
+                for daemon in daemons:
+                    daemon_name = daemon.get('daemon_name') # e.g. mds.perf_test_fs.ceph53.vjshxm
+                    if not daemon_name:
+                        continue
+                    
+                    src_log = f"{log_dir}/ceph-{daemon_name}.log"
+                    dest_log = f"{server_name}_lp{lp_tag}_{daemon_name}.log"
+                    
+                    # Copy and rename on the server first
+                    self.run_remote(server_name, f"sudo cp {src_log} /tmp/{dest_log}")
+                    user, _, _ = self.get_ssh_details(server_name)
+                    self.run_remote(server_name, f"sudo chown {user}:{user} /tmp/{dest_log}")
+                    
+                    # Transfer to admin
+                    admin_user, admin_host, admin_port = self.get_ssh_details(self.admin)
+                    copy_cmd = f"scp -o StrictHostKeyChecking=no -P {admin_port} /tmp/{dest_log} {admin_user}@{admin_host}:{results_dir}/"
+                    self.run_remote(server_name, copy_cmd)
+                    
+                    # Cleanup tmp
+                    self.run_remote(server_name, f"rm -f /tmp/{dest_log}")
+                    
+                    # Clear the original log file to avoid overlap for next loadpoint
+                    self.run_remote(server_name, f"sudo truncate -s 0 {src_log}")
 
     def start_lockstat(self, fs):
         lockstat_cfg = self.config.get('specstorage', {}).get('lockstat', {})
