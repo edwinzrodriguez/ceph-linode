@@ -284,6 +284,35 @@
         {% endfor %}
         {% endfor %}
 
+        ---
+        service_type: nfs
+        service_id: ganesha
+        placement:
+          label: ganeshas
+        spec:
+          port: 2049
+        # Overcome NFSv3 and GSSAPI issues by mounting a custom config
+        # and overriding the entrypoint to use it exclusively.
+        extra_container_args:
+          - "-v"
+          - "/etc/ceph:/etc/ceph:z"
+          - "-v"
+          - "/etc/ceph/ganesha-custom.conf:/etc/ganesha/custom.conf:z"
+          - "--env"
+          - "GSS_USE_HOSTNAME=0"
+          - "--env"
+          - "CEPH_CONF=/etc/ceph/ceph.conf"
+          - "--entrypoint"
+          - "/usr/bin/ganesha.nfsd"
+        extra_entrypoint_args:
+          - "-F"
+          - "-L"
+          - "STDERR"
+          - "-N"
+          - "NIV_EVENT"
+          - "-f"
+          - "/etc/ganesha/custom.conf"
+
 
   - name: check ceph already bootstrapped
     stat:
@@ -321,7 +350,7 @@
   - name: disable stderr logging of cluster log
     shell: ceph config set global mon_cluster_log_to_stderr false
 
-- hosts: clients
+- hosts: clients ganeshas
   become: yes
   tasks:
   - name: Install cephadm (RHEL/CentOS 9/10)
@@ -347,3 +376,50 @@
       owner: root
       group: root
       mode: 0644
+
+  - name: fetch admin keyring
+    slurp:
+      src: /etc/ceph/ceph.client.admin.keyring
+    delegate_to: "{{ groups['mons'][0] }}"
+    register: admin_keyring
+    run_once: true
+
+  - name: setup admin keyring
+    copy:
+      content: "{{ admin_keyring.content | b64decode }}"
+      dest: /etc/ceph/ceph.client.admin.keyring
+      owner: root
+      group: root
+      mode: 0600
+
+  - name: setup custom ganesha config
+    when: "'ganeshas' in group_names"
+    copy:
+      dest: /etc/ceph/ganesha-custom.conf
+      owner: root
+      group: root
+      mode: 0644
+      content: |
+        NFS_Core_Param {
+            Protocols = 4;
+            Enable_NLM = false;
+            Enable_RQUOTA = false;
+            NFS_Port = 2049;
+        }
+        NFSv4 {
+            RecoveryBackend = "rados_cluster";
+            Minor_Versions = 1, 2;
+        }
+        RADOS_KV {
+            nodeid = 0;
+            pool = ".nfs";
+            namespace = "ganesha";
+            UserId = "admin";
+        }
+        RADOS_URLS {
+            UserId = "admin";
+            watch_url = "rados://.nfs/ganesha/conf-nfs.ganesha";
+        }
+        # Cephadm will still manage exports via the %url include
+        # but we use our custom global settings
+        %url rados://.nfs/ganesha/conf-nfs.ganesha

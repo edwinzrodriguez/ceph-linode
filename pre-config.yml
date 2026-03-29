@@ -205,6 +205,18 @@
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
 
+  - name: Update all packages
+    ansible.builtin.dnf:
+      name: "*"
+      state: latest
+    when: ansible_distribution in ['CentOS', 'RedHat']
+    register: upgrade_all
+
+  - name: Reboot nodes after update
+    ansible.builtin.reboot:
+      reboot_timeout: 300
+    when: upgrade_all.changed
+
   - name: Install systemtap and related packages
     ansible.builtin.dnf:
       name:
@@ -219,18 +231,12 @@
     when: ansible_distribution_major_version | int >= 10
     ignore_errors: yes
 
-  - name: Update all packages
-    ansible.builtin.dnf:
-      name: "*"
-      state: latest
-    when: ansible_distribution in ['CentOS', 'RedHat']
-
   # package setup
   # - logrotate needs psmisc for killall
   # - ceph-ansible needs EPEL but also needs ca-certificates installed to avoid some errors, do this now
   - name: install launcher packages
     yum:
-      name: logrotate,psmisc,ca-certificates,python3,chrony,podman,lvm2
+      name: logrotate,psmisc,ca-certificates,python3,chrony,podman,lvm2,firewalld
       state: latest
 
   # log rotation setup
@@ -286,4 +292,4 @@
   - name: install nfs-utils
     yum: name=nfs-utils state=latest update_cache=yes
 
-#- import_playbook: iptables.yml
+- import_playbook: iptables.yml

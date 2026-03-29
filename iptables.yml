@@ -13,7 +13,7 @@
 # this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
-# Configure iptables on the cluster to only allow local private network
+# Configure firewalld on the cluster to only allow local private network
 # traffic. We don't want the internet to have access to the cluster services.
 # Although Ceph **is** configured to have its cluster_network/public_network on
 # the Linode private LAN, some services still listen on all interfaces
@@ -22,80 +22,46 @@
 - hosts: all
   become: yes
   tasks:
-  - name: install launcher packages
-    yum:
-      name: iptables-services
-      state: latest
-
-  # We disable firewalld because we don't want anything (like
-  # grafana/prometheus) to be accessible via the internet. cephadm opens up
-  # those ports if it detects firewalld. Also, if we leave this on and
-  # configure iptables, then the ceph cluster becomes inaccessible during
-  # cephadm bootstrap.
-  - name: disable firewalld
+  - name: enable firewalld
     systemd:
       name: firewalld.service
-      state: stopped
-      enabled: no
-
-  - name: enable iptables-services
-    systemd:
-      enabled: yes
-      name: iptables.service
       state: started
+      enabled: yes
 
-  - name: Set the policy for the INPUT chain to ACCEPT
-    iptables:
-      chain: INPUT
-      policy: ACCEPT
+  - name: gather all network ranges from inventory
+    set_fact:
+      all_networks: >-
+        {{
+          (
+            groups['all']
+            | map('extract', hostvars)
+            | map(attribute='public_network', default=None)
+            | select('string')
+            | list
+            +
+            groups['all']
+            | map('extract', hostvars)
+            | map(attribute='cluster_network', default=None)
+            | select('string')
+            | list
+          )
+          | unique
+        }}
+    run_once: true
 
-  - name: clear iptables
-    iptables:
-      flush: yes
-      chain: INPUT
+  - name: allow traffic from cluster and public networks
+    firewalld:
+      source: "{{ item }}"
+      zone: public
+      state: enabled
+      permanent: yes
+      immediate: yes
+    loop: "{{ all_networks | unique }}"
 
-  - name: accept ssh connections
-    iptables:
-      chain: INPUT
-      protocol: tcp
-      destination_port: 22
-      ctstate: NEW
-      syn: match
-      jump: ACCEPT
-      comment: Accept new SSH connections.
-
-  - name: accept existing connections
-    iptables:
-      chain: INPUT
-      ctstate: ESTABLISHED,RELATED
-      jump: ACCEPT
-      comment: Accept existing connections.
-
-  - name: Match on IP ranges
-    iptables:
-      chain: INPUT
-      source: 192.168.0.0/16
-      jump: ACCEPT
-      comment: Allow private ip traffic.
-
-  - name: Match on IP ranges
-    iptables:
-      chain: INPUT
-      source: 10.0.0.0/8
-      jump: ACCEPT
-      comment: Allow private ip traffic.
-
-  - name: Match on localhost
-    iptables:
-      chain: INPUT
-      source: 127.0.0.0/8
-      jump: ACCEPT
-      comment: Allow localhost traffic.
-
-  - name: Set the policy for the INPUT chain to DROP
-    iptables:
-      chain: INPUT
-      policy: DROP
-
-  - name: save iptables rules
-    shell: /usr/libexec/iptables/iptables.init save
+  - name: allow ssh
+    firewalld:
+      service: ssh
+      zone: public
+      state: enabled
+      permanent: yes
+      immediate: yes
