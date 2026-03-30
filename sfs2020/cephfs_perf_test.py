@@ -330,15 +330,62 @@ class CephFSPerfTest:
     def provision_ganesha(self):
         print("Provisioning NFS-Ganesha service...")
         svc_id = self.config['ganesha'].get('service_id', 'ganesha')
-        
+
         # Setup custom ganesha config on ganesha nodes
         self.setup_ganesha_config()
-        
+
         # Generate and apply NFS service spec
-        self.generate_ganesha_yaml(svc_id, self.ganeshas)
+        self.generate_ganesha_yaml(svc_id, self.ganeshas, use_custom_config=True)
         ganesha_yaml = self.config.get('ganesha_yaml_path', '/sfs2020/ganesha.yaml')
         self.run_remote(self.admin, f"sudo ceph orch apply -i {ganesha_yaml}")
-        
+
+        for idx, fs in enumerate(self.fs_names):
+            export_path = f"/{fs}-export"
+            print(f"Creating NFS export for {fs} at {export_path}...")
+            
+            # Use JSON-based export application for better control
+            export_json = {
+                "export_id": 100 + idx, # Ensure unique IDs starting from 100
+                "path": "/",
+                "pseudo": export_path,
+                "access_type": "RW",
+                "squash": "no_root_squash",
+                "protocols": [4],
+                "transports": ["TCP"],
+                "fsal": {
+                    "name": "CEPH",
+                    "fs_name": fs,
+                    "cmount_path": "/"
+                },
+                "clients": [
+                    {
+                        "addresses": ["*"],
+                        "access_type": "RW",
+                        "squash": "no_root_squash"
+                    }
+                ]
+            }
+            
+            # Write export_json to a file in /sfs2020 named with the export name
+            export_filename = f"export_{fs}.json"
+            local_export_file = f"/tmp/{export_filename}"
+            remote_export_path = f"/sfs2020/{export_filename}"
+            
+            with open(local_export_file, 'w') as f:
+                json.dump(export_json, f, indent=4)
+            
+            user, host, port = self.get_ssh_details(self.admin)
+            subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, local_export_file, f"{user}@{host}:{remote_export_path}"])
+            os.remove(local_export_file)
+
+            # Apply export using the file
+            cmd = f"sudo ceph nfs export apply {svc_id} -i {remote_export_path}"
+            self.run_remote(self.admin, cmd)
+
+        # Restart NFS service to reload config
+        print(f"Restarting NFS service nfs.{svc_id}...")
+        self.run_remote(self.admin, f"sudo ceph orch restart nfs.{svc_id}")
+
         # Wait for NFS service to be active
         print(f"Waiting for NFS service {svc_id} to be active...")
         start_wait = time.time()
@@ -356,12 +403,6 @@ class CephFSPerfTest:
                 break
             time.sleep(10)
 
-        for fs in self.fs_names:
-            export_path = f"/{fs}"
-            print(f"Creating NFS export for {fs} at {export_path}...")
-            # Create NFS export for CephFS
-            # Usage: ceph nfs export create cephfs <cluster_id> <pseudo_path> <fsname> [--path=/<path>] [--readonly]
-            self.run_remote(self.admin, f"sudo ceph nfs export create cephfs {svc_id} {export_path} {fs} --path=/")
 
     def cleanup_ganesha(self):
         print("Cleaning up NFS-Ganesha exports and service...")
@@ -371,13 +412,16 @@ class CephFSPerfTest:
         exports_raw = self.run_remote(self.admin, f"sudo ceph nfs export ls {svc_id} --format json")
         exports = self.safe_json_load(exports_raw)
         if exports:
-            for export_path in exports:
+            # exports might be a list of paths or a list of dicts depending on version
+            for exp in exports:
+                # If it's a dict, get the pseudo path
+                export_path = exp.get('path') if isinstance(exp, dict) else exp
                 print(f"Removing NFS export {export_path} from {svc_id}...")
                 self.run_remote(self.admin, f"sudo ceph nfs export rm {svc_id} {export_path}")
         else:
             # If 'ceph nfs export ls' fails or returns non-json, try to remove by our known fs_names
             for fs in self.fs_names:
-                export_path = f"/{fs}"
+                export_path = f"/{fs}-export"
                 print(f"Attempting to remove NFS export {export_path} from {svc_id}...")
                 self.run_remote(self.admin, f"sudo ceph nfs export rm {svc_id} {export_path} || true")
 
@@ -485,8 +529,8 @@ class CephFSPerfTest:
              user, host, port = self.get_ssh_details(self.admin)
              subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, local_mds_yaml, f"{user}@{host}:{self.config['mds_yaml_path']}"])
 
-    def generate_ganesha_yaml(self, svc_id, selected_hosts):
-        print(f"Generating ganesha.yaml for {svc_id}...")
+    def generate_ganesha_yaml(self, svc_id, selected_hosts, use_custom_config=False):
+        print(f"Generating ganesha.yaml for {svc_id} (custom_config={use_custom_config})...")
         
         ganesha_spec = {
             'service_type': 'nfs',
@@ -496,19 +540,23 @@ class CephFSPerfTest:
             },
             'spec': {
                 'port': 2049
-            },
-            'extra_container_args': [
-                "-v", "/etc/ceph:/etc/ceph:z",
-                "-v", "/etc/ceph/ganesha-custom.conf:/etc/ganesha/custom.conf:z",
-                "--env", "GSS_USE_HOSTNAME=0",
-                "--env", "CEPH_CONF=/etc/ceph/ceph.conf",
-                "--entrypoint", "/usr/bin/ganesha.nfsd"
-            ],
-            'extra_entrypoint_args': [
-                "-F", "-L", "STDERR", "-N", "NIV_EVENT",
-                "-f", "/etc/ganesha/custom.conf"
-            ]
+            }
         }
+
+        if use_custom_config:
+            ganesha_spec.update({
+                'extra_container_args': [
+                    "-v", "/etc/ceph:/etc/ceph:z",
+                    "-v", "/etc/ceph/ganesha-custom.conf:/etc/ganesha/custom.conf:z",
+                    "--env", "GSS_USE_HOSTNAME=0",
+                    "--env", "CEPH_CONF=/etc/ceph/ceph.conf",
+                    "--entrypoint", "/usr/bin/ganesha.nfsd"
+                ],
+                'extra_entrypoint_args': [
+                    "-F", "-L", "STDERR", "-N", "NIV_EVENT",
+                    "-f", "/etc/ganesha/custom.conf"
+                ]
+            })
 
         local_ganesha_yaml = "ganesha.yaml"
         with open(local_ganesha_yaml, 'w') as f:
@@ -543,7 +591,7 @@ class CephFSPerfTest:
             "}\n"
             "# Cephadm will still manage exports via the %url include\n"
             "# but we use our custom global settings\n"
-            "%url rados://.nfs/ganesha/conf-nfs.ganesha\n"
+            "%%url rados://.nfs/ganesha/conf-nfs.ganesha\n"
         )
         
         for host_name in self.ganeshas:
@@ -611,7 +659,7 @@ class CephFSPerfTest:
         mounts_per_fs = self.config['specstorage'].get('mounts_per_fs', 1)
         
         for fs in self.fs_names:
-            export_path = f"/{fs}"
+            export_path = f"/{fs}-export"
             for i, client_name in enumerate(self.clients):
                 # Pick a ganesha server - round robin across clients
                 ganesha_host = self.ganeshas[i % len(self.ganeshas)]
