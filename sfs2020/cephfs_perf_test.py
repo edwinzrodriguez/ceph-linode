@@ -327,15 +327,16 @@ class CephFSPerfTest:
         
         self.distribute_keys_and_config()
 
-    def provision_ganesha(self):
+    def provision_ganesha(self, use_custom_config=True):
         print("Provisioning NFS-Ganesha service...")
         svc_id = self.config['ganesha'].get('service_id', 'ganesha')
 
         # Setup custom ganesha config on ganesha nodes
-        self.setup_ganesha_config()
+        if use_custom_config:
+            self.setup_ganesha_config()
 
         # Generate and apply NFS service spec
-        self.generate_ganesha_yaml(svc_id, self.ganeshas, use_custom_config=True)
+        self.generate_ganesha_yaml(svc_id, self.ganeshas, use_custom_config=use_custom_config)
         ganesha_yaml = self.config.get('ganesha_yaml_path', '/sfs2020/ganesha.yaml')
         self.run_remote(self.admin, f"sudo ceph orch apply -i {ganesha_yaml}")
 
