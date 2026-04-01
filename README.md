@@ -100,6 +100,25 @@ The repository has a number of utilities roughly organized as:
   - `https://eu-de.iaas.cloud.ibm.com/v1`
   - `https://eu-es.iaas.cloud.ibm.com/v1`
 
+* If using a private container registry, you can store your credentials in an environment file (e.g., `ibm-credentials.env`) and reference them in `group_vars/all.yml`.
+
+  Add the following to `ibm-credentials.env`:
+
+  ```bash
+  IBM_CR_USERNAME='your-username'
+  IBM_STG_PASSWORD='your-password-or-token'
+  ```
+
+  Then, configure `group_vars/all.yml` to use these credentials:
+
+  ```yaml
+  CEPH_REGISTRY_URL: 'cp.stg.icr.io'
+  CEPH_REGISTRY_USERNAME: ibm-credentials.env:IBM_CR_USERNAME
+  CEPH_REGISTRY_PASSWORD: ibm-credentials.env:IBM_STG_PASSWORD
+  ```
+
+  The `file:key` format tells the installer to extract the value of `key` from `file`.
+
 * Setup an ssh key if not already done:
 
   ```bash
