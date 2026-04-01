@@ -9,4 +9,12 @@ RELEASE: tentacle
 CEPHADM_REPO: --release tentacle
 # Container image to use for cephadm bootstrap (and other cephadm operations when needed)
 #CEPH_IMAGE: "quay.io/ceph/ceph:v20.2.0"
-CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.2.0:latest"
+#CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.2.0:latest"
+#CEPH_IMAGE: "quay.ceph.io/ceph-ci/ceph:ceph-lockstat-centos-stream9-x86_64-devel"
+#CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.3.0-5774-g97aabdd9"
+#CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.3.0-5887-g4ed976b5aa7"
+#CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.3.0-6044.g76997aee693"
+CEPH_IMAGE: "cp.stg.icr.io/cp/ibm-ceph/ceph-9-rhel9:v9.0-13905"
+CEPH_REGISTRY_USERNAME: ibm-credentials.env:IBM_CR_USERNAME
+CEPH_REGISTRY_PASSWORD: ibm-credentials.env:IBM_STG_PASSWORD
+CEPH_REGISTRY_URL: "cp.stg.icr.io"
