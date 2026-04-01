@@ -290,8 +290,61 @@
       path: /etc/ceph/ceph.conf
     register: ceph_installed
 
+  - name: Extract raw registry username
+    set_fact:
+      raw_registry_username: >-
+        {% if CEPH_REGISTRY_USERNAME is defined and ':' in CEPH_REGISTRY_USERNAME %}
+          {% set parts = CEPH_REGISTRY_USERNAME.split(':') %}
+          {{ lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') }}
+        {% else %}
+          {{ CEPH_REGISTRY_USERNAME | default('') }}
+        {% endif %}
+    delegate_to: localhost
+    become: no
+    run_once: true
+    when: not ceph_installed.stat.exists and CEPH_REGISTRY_USERNAME is defined
+
+  - name: Clean registry username
+    set_fact:
+      registry_username: "{{ raw_registry_username | trim | regex_replace(\"^'|'$\", '') | regex_replace('^\"|\"$', '') | replace('\n', '') | replace('\r', '') | trim }}"
+    delegate_to: localhost
+    become: no
+    run_once: true
+    when: not ceph_installed.stat.exists and CEPH_REGISTRY_USERNAME is defined
+
+  - name: Extract raw registry password
+    set_fact:
+      raw_registry_password: >-
+        {% if CEPH_REGISTRY_PASSWORD is defined and ':' in CEPH_REGISTRY_PASSWORD %}
+          {% set parts = CEPH_REGISTRY_PASSWORD.split(':') %}
+          {{ lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') }}
+        {% else %}
+          {{ CEPH_REGISTRY_PASSWORD | default('') }}
+        {% endif %}
+    delegate_to: localhost
+    become: no
+    run_once: true
+    when: not ceph_installed.stat.exists and CEPH_REGISTRY_PASSWORD is defined
+
+  - name: Clean registry password
+    set_fact:
+      registry_password: "{{ raw_registry_password | trim | regex_replace(\"^'|'$\", '') | regex_replace('^\"|\"$', '') | replace('\n', '') | replace('\r', '') | trim }}"
+    delegate_to: localhost
+    become: no
+    run_once: true
+    when: not ceph_installed.stat.exists and CEPH_REGISTRY_PASSWORD is defined
+
   - name: "cephadm bootstrap"
-    shell: "cephadm --image {{ CEPH_IMAGE }} bootstrap --mon-ip {{ monitor_address }} --ssh-private-key {{ ssh_user_home }}/.ssh/id_ed25519 --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub --apply-spec {{ ssh_user_home }}/cluster.spec --skip-mon-network"
+    shell: >
+      cephadm --image {{ CEPH_IMAGE }} bootstrap
+      --mon-ip {{ monitor_address }}
+      --ssh-private-key {{ ssh_user_home }}/.ssh/id_ed25519
+      --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub
+      --apply-spec {{ ssh_user_home }}/cluster.spec
+      --skip-mon-network
+      {% if CEPH_REGISTRY_URL is defined and CEPH_REGISTRY_URL %}--registry-url {{ CEPH_REGISTRY_URL | trim }}{% endif %}
+      {% if registry_username is defined and registry_username %}--registry-username {{ registry_username | trim }}{% endif %}
+      {% if registry_password is defined and registry_password %}--registry-password {{ registry_password | trim }}{% endif %}
     when: not ceph_installed.stat.exists
 
   - name: config public network
