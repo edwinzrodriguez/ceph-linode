@@ -63,7 +63,7 @@
       ansible.builtin.dnf:
         name: "*"
         state: latest
-      when: ansible_distribution == 'CentOS' or ansible_distribution == 'RedHat'
+      when: ansible_distribution in ['CentOS', 'RedHat', 'Rocky']
 
 #    - name: Autoremove unneeded packages installed as dependencies
 #      ansible.builtin.dnf:
@@ -177,6 +177,8 @@
 
           if [ "{{ ansible_distribution }}" = "RedHat" ]; then
             dnf config-manager --set-enabled codeready-builder-for-rhel-{{ ansible_distribution_major_version }}-x86_64-rpms
+          elif [ "{{ ansible_distribution }}" = "Rocky" ]; then
+            dnf config-manager --set-enabled crb
           else
             dnf config-manager --set-enabled crb
           fi

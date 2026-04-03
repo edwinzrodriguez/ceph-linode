@@ -144,11 +144,11 @@
   become: yes
   tasks:
 
-  - name: Install cephadm (RHEL/CentOS 9/10)
+  - name: Install cephadm (RHEL/CentOS/Rocky 9/10)
     ansible.builtin.dnf:
       name: cephadm
       state: present
-    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
     shell: "cephadm install ceph-common"
@@ -196,7 +196,10 @@
       cephadm registry-login
       --registry-url {{ CEPH_REGISTRY_URL | trim }}
       --registry-username {{ hostvars['localhost']['registry_username'] | trim }}
-      --registry-password {{ hostvars['localhost']['registry_password'] | trim }}
+      --registry-password {{ hostvars['localhost']['registry_password'] | trim }} &&
+      podman login {{ CEPH_REGISTRY_URL | trim }}
+      -u {{ hostvars['localhost']['registry_username'] | trim }}
+      -p {{ hostvars['localhost']['registry_password'] | trim }}
     when:
       - CEPH_REGISTRY_URL is defined and (CEPH_REGISTRY_URL | length > 0)
       - hostvars['localhost']['registry_username'] is defined and (hostvars['localhost']['registry_username'] | length > 0)
@@ -424,11 +427,11 @@
 - hosts: clients ganeshas
   become: yes
   tasks:
-  - name: Install cephadm (RHEL/CentOS 9/10)
+  - name: Install cephadm (RHEL/CentOS/Rocky 9/10)
     ansible.builtin.dnf:
       name: cephadm
       state: present
-    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
     shell: "cephadm install ceph-common ceph-fuse"

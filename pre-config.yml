@@ -154,20 +154,20 @@
       exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*,thrift*' if ansible_distribution_major_version | int >= 9 else '' }}"
       state: present
 
-  - name: Add IBM Storage Ceph repository (RHEL/CentOS 9/10)
+  - name: Add IBM Storage Ceph repository (RHEL/CentOS/Rocky 9/10)
     ansible.builtin.get_url:
       url: "https://public.dhe.ibm.com/ibmdl/export/pub/storage/ceph/ibm-storage-ceph-9-rhel-{{ ansible_distribution_major_version }}.repo"
       dest: /etc/yum.repos.d/ibm-storage-ceph.repo
       owner: root
       group: root
       mode: '0644'
-    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
-  - name: Install IBM Storage Ceph license (RHEL/CentOS 9/10)
+  - name: Install IBM Storage Ceph license (RHEL/CentOS/Rocky 9/10)
     ansible.builtin.dnf:
       name: ibm-storage-ceph-license
       state: present
-    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: Accept IBM license
     ansible.builtin.file:
@@ -176,7 +176,7 @@
       owner: root
       group: root
       mode: '0755'
-    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: Touch IBM license accept file
     ansible.builtin.file:
@@ -185,7 +185,7 @@
       owner: root
       group: root
       mode: '0644'
-    when: ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version | int >= 9
+    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: clean up epel-next repo exclude (avoid DuplicateOptionError)
     shell: "if [ -f /etc/yum.repos.d/epel-next.repo ]; then sed -i '/^\\[epel-next\\]/,/^\\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel-next.repo; fi"
@@ -209,7 +209,7 @@
     ansible.builtin.dnf:
       name: "*"
       state: latest
-    when: ansible_distribution in ['CentOS', 'RedHat']
+    when: ansible_distribution in ['CentOS', 'RedHat', 'Rocky']
     register: upgrade_all
 
   - name: Reboot nodes after update

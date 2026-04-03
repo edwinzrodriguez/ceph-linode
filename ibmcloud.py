@@ -257,11 +257,13 @@ class CephIbmCloud:
 
     @property
     def ssh_user(self):
-        # Default to 'vpcuser' for RedHat-like images, 'ubuntu' for Ubuntu-like.
+        # Default to 'vpcuser' for RedHat-like images, 'ubuntu' for Ubuntu-like, 'rocky' for Rocky.
         # This matches the expected default for common cloud images.
         image_name = self.cluster.get("image", "").lower()
         if "ubuntu" in image_name:
             default_user = "ubuntu"
+        elif "rocky" in image_name:
+            default_user = "rocky"
         else:
             default_user = "vpcuser"
         return self.cluster.get("cluster_ssh_user", self.cluster.get("ssh_user", default_user))
