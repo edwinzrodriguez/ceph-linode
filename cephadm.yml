@@ -156,37 +156,47 @@
 - hosts: localhost
   gather_facts: no
   tasks:
-  - name: Extract raw registry username
+  - name: Extract raw registry credentials
     set_fact:
-      raw_registry_username: >-
-        {% if CEPH_REGISTRY_USERNAME is defined and ':' in CEPH_REGISTRY_USERNAME %}
-          {% set parts = CEPH_REGISTRY_USERNAME.split(':') %}
-          {{ lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') }}
-        {% else %}
-          {{ CEPH_REGISTRY_USERNAME | default('') }}
+      raw_registry_creds: >-
+        {% set creds_list = [] %}
+        {% set input_list = [] %}
+        {% if CEPH_REGISTRY_LIST is defined and CEPH_REGISTRY_LIST is iterable %}
+          {% for r in CEPH_REGISTRY_LIST %}
+            {% if r is mapping %}
+              {% set _ = input_list.append(r) %}
+            {% endif %}
+          {% endfor %}
         {% endif %}
-    when: CEPH_REGISTRY_USERNAME is defined
-
-  - name: Clean registry username (localhost)
-    set_fact:
-      registry_username: "{{ raw_registry_username | default('') | trim | regex_replace(\"^'|'$\", '') | regex_replace('^\"|\"$', '') | replace('\\n','') | replace('\\r','') | trim }}"
-    when: raw_registry_username is defined
-
-  - name: Extract raw registry password
-    set_fact:
-      raw_registry_password: >-
-        {% if CEPH_REGISTRY_PASSWORD is defined and ':' in CEPH_REGISTRY_PASSWORD %}
-          {% set parts = CEPH_REGISTRY_PASSWORD.split(':') %}
-          {{ lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') }}
-        {% else %}
-          {{ CEPH_REGISTRY_PASSWORD | default('') }}
+        {% if CEPH_REGISTRY_URL is defined and CEPH_REGISTRY_USERNAME is defined and CEPH_REGISTRY_PASSWORD is defined %}
+          {% set _ = input_list.append({'url': CEPH_REGISTRY_URL, 'username': CEPH_REGISTRY_USERNAME, 'password': CEPH_REGISTRY_PASSWORD}) %}
         {% endif %}
-    when: CEPH_REGISTRY_PASSWORD is defined
+        {% for item in input_list %}
+          {% set ns = namespace(user=item.username | default(''), pass=item.password | default('')) %}
+          {% if ':' in ns.user %}
+            {% set parts = ns.user.split(':') %}
+            {% set ns.user = lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') %}
+          {% endif %}
+          {% if ':' in ns.pass %}
+            {% set parts = ns.pass.split(':') %}
+            {% set ns.pass = lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') %}
+          {% endif %}
+          {% set _ = creds_list.append({'url': item.url | default(''), 'user': ns.user, 'pass': ns.pass}) %}
+        {% endfor %}
+        {{ creds_list | to_json }}
+    when: (CEPH_REGISTRY_LIST is defined) or (CEPH_REGISTRY_URL is defined)
 
-  - name: Clean registry password (localhost)
+  - name: Clean registry credentials (localhost)
     set_fact:
-      registry_password: "{{ raw_registry_password | default('') | trim | regex_replace(\"^'|'$\", '') | regex_replace('^\"|\"$', '') | replace('\\n','') | replace('\\r','') | trim }}"
-    when: raw_registry_password is defined
+      registry_credentials: >-
+        {% set cleaned_list = [] %}
+        {% for item in raw_registry_creds | from_json %}
+          {% set c_user = item.user | default('') | trim | regex_replace("^'|'$", "") | regex_replace('^"|"$', "") | replace('\n','') | replace('\r','') | trim %}
+          {% set c_pass = item.pass | default('') | trim | regex_replace("^'|'$", "") | regex_replace('^"|"$', "") | replace('\n','') | replace('\r','') | trim %}
+          {% set _ = cleaned_list.append({'url': (item.url | default('') | trim), 'username': c_user, 'password': c_pass}) %}
+        {% endfor %}
+        {{ cleaned_list | to_json }}
+    when: raw_registry_creds is defined
 
 - hosts: mons mgrs osds mdss clients ganeshas
   become: yes
@@ -194,16 +204,17 @@
   - name: cephadm registry-login on all cephadm nodes
     shell: >
       cephadm registry-login
-      --registry-url {{ CEPH_REGISTRY_URL | trim }}
-      --registry-username {{ hostvars['localhost']['registry_username'] | trim }}
-      --registry-password {{ hostvars['localhost']['registry_password'] | trim }} &&
-      podman login {{ CEPH_REGISTRY_URL | trim }}
-      -u {{ hostvars['localhost']['registry_username'] | trim }}
-      -p {{ hostvars['localhost']['registry_password'] | trim }}
+      --registry-url {{ item.url }}
+      --registry-username {{ item.username }}
+      --registry-password {{ item.password }} &&
+      podman login {{ item.url }}
+      -u {{ item.username }}
+      -p {{ item.password }}
+    loop: "{{ hostvars['localhost']['registry_credentials'] | from_json | default([]) }}"
     when:
-      - CEPH_REGISTRY_URL is defined and (CEPH_REGISTRY_URL | length > 0)
-      - hostvars['localhost']['registry_username'] is defined and (hostvars['localhost']['registry_username'] | length > 0)
-      - hostvars['localhost']['registry_password'] is defined and (hostvars['localhost']['registry_password'] | length > 0)
+      - item.url | length > 0
+      - item.username | length > 0
+      - item.password | length > 0
 
 - hosts: mons
   become: yes
@@ -342,49 +353,53 @@
       path: /etc/ceph/ceph.conf
     register: ceph_installed
 
-  - name: Extract raw registry username
+  - name: Extract raw registry credentials
     set_fact:
-      raw_registry_username: >-
-        {% if CEPH_REGISTRY_USERNAME is defined and ':' in CEPH_REGISTRY_USERNAME %}
-          {% set parts = CEPH_REGISTRY_USERNAME.split(':') %}
-          {{ lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') }}
-        {% else %}
-          {{ CEPH_REGISTRY_USERNAME | default('') }}
+      raw_registry_creds: >-
+        {% set creds_list = [] %}
+        {% set input_list = [] %}
+        {% if CEPH_REGISTRY_LIST is defined and CEPH_REGISTRY_LIST is iterable %}
+          {% for r in CEPH_REGISTRY_LIST %}
+            {% if r is mapping %}
+              {% set _ = input_list.append(r) %}
+            {% endif %}
+          {% endfor %}
         {% endif %}
-    delegate_to: localhost
-    become: no
-    run_once: true
-    when: not ceph_installed.stat.exists and CEPH_REGISTRY_USERNAME is defined
-
-  - name: Clean registry username
-    set_fact:
-      registry_username: "{{ raw_registry_username | trim | regex_replace(\"^'|'$\", '') | regex_replace('^\"|\"$', '') | replace('\n', '') | replace('\r', '') | trim }}"
-    delegate_to: localhost
-    become: no
-    run_once: true
-    when: not ceph_installed.stat.exists and CEPH_REGISTRY_USERNAME is defined
-
-  - name: Extract raw registry password
-    set_fact:
-      raw_registry_password: >-
-        {% if CEPH_REGISTRY_PASSWORD is defined and ':' in CEPH_REGISTRY_PASSWORD %}
-          {% set parts = CEPH_REGISTRY_PASSWORD.split(':') %}
-          {{ lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') }}
-        {% else %}
-          {{ CEPH_REGISTRY_PASSWORD | default('') }}
+        {% if CEPH_REGISTRY_URL is defined and CEPH_REGISTRY_USERNAME is defined and CEPH_REGISTRY_PASSWORD is defined %}
+          {% set _ = input_list.append({'url': CEPH_REGISTRY_URL, 'username': CEPH_REGISTRY_USERNAME, 'password': CEPH_REGISTRY_PASSWORD}) %}
         {% endif %}
+        {% for item in input_list %}
+          {% set ns = namespace(user=item.username | default(''), pass=item.password | default('')) %}
+          {% if ':' in ns.user %}
+            {% set parts = ns.user.split(':') %}
+            {% set ns.user = lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') %}
+          {% endif %}
+          {% if ':' in ns.pass %}
+            {% set parts = ns.pass.split(':') %}
+            {% set ns.pass = lookup('pipe', 'grep "^' ~ parts[1] ~ '=" ' ~ parts[0] ~ ' | cut -d= -f2-') %}
+          {% endif %}
+          {% set _ = creds_list.append({'url': item.url | default(''), 'user': ns.user, 'pass': ns.pass}) %}
+        {% endfor %}
+        {{ creds_list | to_json }}
     delegate_to: localhost
     become: no
     run_once: true
-    when: not ceph_installed.stat.exists and CEPH_REGISTRY_PASSWORD is defined
+    when: not ceph_installed.stat.exists and ((CEPH_REGISTRY_LIST is defined) or (CEPH_REGISTRY_URL is defined))
 
-  - name: Clean registry password
+  - name: Clean registry credentials
     set_fact:
-      registry_password: "{{ raw_registry_password | trim | regex_replace(\"^'|'$\", '') | regex_replace('^\"|\"$', '') | replace('\n', '') | replace('\r', '') | trim }}"
+      registry_credentials: >-
+        {% set cleaned_list = [] %}
+        {% for item in raw_registry_creds | from_json %}
+          {% set c_user = item.user | default('') | trim | regex_replace("^'|'$", "") | regex_replace('^"|"$', "") | replace('\n', '') | replace('\r', '') | trim %}
+          {% set c_pass = item.pass | default('') | trim | regex_replace("^'|'$", "") | regex_replace('^"|"$', "") | replace('\n', '') | replace('\r', '') | trim %}
+          {% set _ = cleaned_list.append({'url': (item.url | default('') | trim), 'username': c_user, 'password': c_pass}) %}
+        {% endfor %}
+        {{ cleaned_list | to_json }}
     delegate_to: localhost
     become: no
     run_once: true
-    when: not ceph_installed.stat.exists and CEPH_REGISTRY_PASSWORD is defined
+    when: not ceph_installed.stat.exists and raw_registry_creds is defined
 
 
   - name: "cephadm bootstrap"

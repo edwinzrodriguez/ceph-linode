@@ -14,7 +14,20 @@ CEPHADM_REPO: --release tentacle
 #CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.3.0-5774-g97aabdd9"
 #CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.3.0-5887-g4ed976b5aa7"
 #CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.3.0-6044.g76997aee693"
-CEPH_IMAGE: "cp.stg.icr.io/cp/ibm-ceph/ceph-9-rhel9:v9.0-13905"
-CEPH_REGISTRY_USERNAME: ibm-credentials.env:IBM_CR_USERNAME
-CEPH_REGISTRY_PASSWORD: ibm-credentials.env:IBM_STG_PASSWORD
-CEPH_REGISTRY_URL: "cp.stg.icr.io"
+
+#CEPH_IMAGE: "cp.stg.icr.io/cp/ibm-ceph/ceph-9-rhel9:v9.0-13905"
+CEPH_IMAGE: "cp.stg.icr.io/cp/ibm-ceph/ceph-9-rhel9:v9.1-14221"
+CEPH_REGISTRY_LIST:
+  - url: "cp.stg.icr.io"
+    username: ibm-credentials.env:IBM_CR_USERNAME
+    password: ibm-credentials.env:IBM_STG_PASSWORD
+  - url: "cp.icr.io"
+    username: ibm-credentials.env:IBM_CR_USERNAME
+    password: ibm-credentials.env:IBM_CR_PASSWORD
+
+#CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-9-rhel9:v9.0-13905"
+
+#CEPH_IMAGE: "cp.icr.io/cp/ibm-ceph/ceph-9-rhel9:v9.0-13392"
+#CEPH_REGISTRY_USERNAME: ibm-credentials.env:IBM_CR_USERNAME
+#CEPH_REGISTRY_PASSWORD: ibm-credentials.env:IBM_CR_PASSWORD
+#CEPH_REGISTRY_URL: "cp.icr.io"
