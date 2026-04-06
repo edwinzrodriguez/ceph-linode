@@ -143,7 +143,7 @@ class CephFSPerfTest:
         port = meta.get('ansible_ssh_port', '22')
         return user, host, port
 
-    def run_remote(self, host_name, cmd, stream=False):
+    def run_remote(self, host_name, cmd, stream=False, check=False):
         user, host, port = self.get_ssh_details(host_name)
         ssh_target = f"{user}@{host}"
         print(f"[{host_name}] Executing: {cmd}")
@@ -156,12 +156,18 @@ class CephFSPerfTest:
                 output.append(line)
             process.wait()
             if process.returncode != 0:
-                print(f"Error on {host_name}: process exited with {process.returncode}")
+                msg = f"Error on {host_name}: process exited with {process.returncode}"
+                print(msg)
+                if check:
+                    raise Exception(msg)
             return "".join(output)
         else:
             result = subprocess.run(ssh_cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                print(f"Error on {host_name}: {result.stderr}")
+                msg = f"Error on {host_name}: {result.stderr}"
+                print(msg)
+                if check:
+                    raise Exception(msg)
             return result.stdout
 
     def safe_json_load(self, raw_output, default=[]):
@@ -323,13 +329,18 @@ class CephFSPerfTest:
             self.setup_client_auth(fs)
 
         if self.config.get('ganesha', {}).get('enabled', False):
-            self.provision_ganesha()
+            self.provision_ganesha( use_custom_config=True)
         
         self.distribute_keys_and_config()
 
     def provision_ganesha(self, use_custom_config=True):
         print("Provisioning NFS-Ganesha service...")
         svc_id = self.config['ganesha'].get('service_id', 'ganesha')
+
+        # Ensure the .nfs pool exists for Ganesha recovery/config
+        print("Ensuring .nfs pool exists...")
+        self.run_remote(self.admin, "sudo ceph osd pool create .nfs || true")
+        self.run_remote(self.admin, "sudo ceph osd pool application enable .nfs nfs || true")
 
         # Setup custom ganesha config on ganesha nodes
         if use_custom_config:
@@ -381,7 +392,7 @@ class CephFSPerfTest:
 
             # Apply export using the file
             cmd = f"sudo ceph nfs export apply {svc_id} -i {remote_export_path}"
-            self.run_remote(self.admin, cmd)
+            self.run_remote(self.admin, cmd, check=True)
 
         # Restart NFS service to reload config
         print(f"Restarting NFS service nfs.{svc_id}...")
@@ -549,8 +560,10 @@ class CephFSPerfTest:
                 'extra_container_args': [
                     "-v", "/etc/ceph:/etc/ceph:z",
                     "-v", "/etc/ceph/ganesha-custom.conf:/etc/ganesha/custom.conf:z",
+                    "-v", "/var/run/ceph:/var/run/ceph:z",
                     "--env", "GSS_USE_HOSTNAME=0",
                     "--env", "CEPH_CONF=/etc/ceph/ceph.conf",
+                    "--env", "CEPH_ARGS=--admin-socket=/var/run/ceph/ganesha-$cluster-$name.asok",
                     "--entrypoint", "/usr/bin/ganesha.nfsd"
                 ],
                 'extra_entrypoint_args': [
@@ -575,6 +588,7 @@ class CephFSPerfTest:
             "    Enable_NLM = false;\n"
             "    Enable_RQUOTA = false;\n"
             "    NFS_Port = 2049;\n"
+            "    allow_set_io_flusher_fail = true;\n"
             "}\n"
             "NFSv4 {\n"
             "    RecoveryBackend = \"rados_cluster\";\n"
@@ -679,7 +693,7 @@ class CephFSPerfTest:
                     self.run_remote(client_name, f"sudo mkdir -p {mount_path}")
                     # NFS mount command
                     mount_cmd = f"sudo mount -t nfs -o nfsvers=4.1,proto=tcp {ganesha_target}:{export_path} {mount_path}"
-                    self.run_remote(client_name, mount_cmd)
+                    self.run_remote(client_name, mount_cmd, check=True)
                     user, _, _ = self.get_ssh_details(client_name)
                     self.run_remote(client_name, f"sudo chown {user}:{user} {mount_path}")
 
@@ -713,6 +727,36 @@ class CephFSPerfTest:
         user, host, port = self.get_ssh_details(self.admin)
         subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, temp_file, f"{user}@{host}:{output_path}"])
         os.remove(temp_file)
+
+
+    def reset_ganesha_perf(self, host_name):
+        """Resets perf counters on the Ganesha admin socket on the specified host."""
+        cmd = "ls /var/run/ceph/ganesha-*.asok | grep -v 'client.admin.asok' | head -n 1"
+        asok_path = self.run_remote(host_name, cmd).strip()
+        
+        if not asok_path or "No such file or directory" in asok_path:
+            print(f"[{host_name}] Warning: Ganesha admin socket not found for reset.")
+            return
+        
+        print(f"[{host_name}] Resetting Ganesha perf counters via {asok_path}...")
+        self.run_remote(host_name, f"sudo ceph --admin-daemon {asok_path} perf reset all")
+
+    def collect_ganesha_perf_dump(self, host_name):
+        """Collects 'perf dump' from the Ganesha admin socket on the specified host."""
+        # Find the correct asok file. There might be multiple if there are multiple daemons, 
+        # but usually we expect one for the NFS service.
+        # Based on CEPH_ARGS=--admin-socket=/var/run/ceph/ganesha-$cluster-$name.asok
+        # We search for ganesha-*.asok but exclude client.admin.asok if present.
+        cmd = "ls /var/run/ceph/ganesha-*.asok | grep -v 'client.admin.asok' | head -n 1"
+        asok_path = self.run_remote(host_name, cmd).strip()
+        
+        if not asok_path or "No such file or directory" in asok_path:
+            print(f"[{host_name}] Warning: Ganesha admin socket not found.")
+            return None
+        
+        print(f"[{host_name}] Collecting Ganesha perf dump from {asok_path}...")
+        dump_raw = self.run_remote(host_name, f"sudo ceph --admin-daemon {asok_path} perf dump")
+        return self.safe_json_load(dump_raw, default=None)
 
     def run_workload(self, settings, shared_timestamp=None):
         cmd = self.config['specstorage']['run_command']
@@ -771,6 +815,7 @@ class CephFSPerfTest:
         run_phase_started = False
         perf_triggered_for_current_lp = False
         logging_triggered_for_current_lp = False
+        ganesha_perf_enabled = self.config.get('ganesha', {}).get('enabled', False)
         perf_threads = []
         process = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
         output = []
@@ -794,16 +839,29 @@ class CephFSPerfTest:
                     print(f"Triggering MDS logging for Load Point {current_loadpoint}...")
                     self.start_mds_logging(current_loadpoint)
                     logging_triggered_for_current_lp = True
+                
+                if ganesha_perf_enabled:
+                    print(f"Resetting Ganesha perf counters for Load Point {current_loadpoint}...")
+                    for g_host in self.ganeshas:
+                        self.reset_ganesha_perf(g_host)
 
             if "Tests finished" in line:
+                results_dir = payload.get('results_dir')
                 if self.config.get('specstorage', {}).get('lockstat', {}).get('enabled', False):
                     print(f"Dumping lockstat for Load Point {current_loadpoint}...")
-                    results_dir = payload.get('results_dir')
                     self.dump_lockstat(current_loadpoint, results_dir)
                 if logging_triggered_for_current_lp:
                     print(f"Stopping MDS logging for Load Point {current_loadpoint}...")
-                    results_dir = payload.get('results_dir')
                     self.stop_mds_logging(current_loadpoint, results_dir)
+                
+                if ganesha_perf_enabled and results_dir:
+                    print(f"Collecting Ganesha perf dumps for Load Point {current_loadpoint}...")
+                    lp_tag = f"{int(current_loadpoint):02d}"
+                    for g_host in self.ganeshas:
+                        dump = self.collect_ganesha_perf_dump(g_host)
+                        if dump:
+                            filename = f"{g_host}_lp{lp_tag}_ganesha_perf.json"
+                            self.save_json_to_results(g_host, dump, filename, results_dir)
 
             if perf_record_enabled:
                 if run_phase_started and not perf_triggered_for_current_lp:
@@ -1017,6 +1075,23 @@ class CephFSPerfTest:
                         
                         # Cleanup
                         self.run_remote(server_name, f"rm -f {temp_file}")
+
+    def save_json_to_results(self, source_host, data, filename, results_dir):
+        """Helper to save a JSON object to a file and transfer it to the results directory on the admin node."""
+        temp_file = f"/tmp/{filename}"
+        
+        # Write JSON to temp file on source host
+        # We can also do it locally if we have the data, but it's easier to just write it on admin if we are the one having the data.
+        # Actually, self.run_workload is running on the local machine (where the script is).
+        # So we have the 'data' here. We should write it to a local temp file and scp it to admin's results_dir.
+        
+        local_temp = f"/tmp/{filename}"
+        with open(local_temp, 'w') as f:
+            json.dump(data, f, indent=4)
+        
+        user, host, port = self.get_ssh_details(self.admin)
+        subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, local_temp, f"{user}@{host}:{results_dir}/"])
+        os.remove(local_temp)
 
     def parse_si_unit(self, value):
         if not isinstance(value, str):
