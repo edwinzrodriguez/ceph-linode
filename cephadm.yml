@@ -439,6 +439,24 @@
   - name: disable stderr logging of cluster log
     shell: ceph config set global mon_cluster_log_to_stderr false
 
+  - name: configure custom container images
+    shell: "ceph config set mgr mgr/cephadm/{{ item.key }} {{ item.value }}"
+    loop: "{{ CEPH_CONTAINER_IMAGES | dict2items }}"
+    when:
+      - not ceph_installed.stat.exists
+      - CEPH_CONTAINER_IMAGES is defined
+      - CEPH_CONTAINER_IMAGES is mapping
+      - item.value | length > 0
+
+  - name: redeploy custom container image services
+    shell: "ceph orch redeploy {{ item.key | regex_replace('^container_image_', '') }}"
+    loop: "{{ CEPH_CONTAINER_IMAGES | dict2items }}"
+    when:
+      - not ceph_installed.stat.exists
+      - CEPH_CONTAINER_IMAGES is defined
+      - CEPH_CONTAINER_IMAGES is mapping
+      - item.value | length > 0
+
 - hosts: clients ganeshas
   become: yes
   tasks:
