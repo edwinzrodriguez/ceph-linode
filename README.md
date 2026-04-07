@@ -109,12 +109,22 @@ The repository has a number of utilities roughly organized as:
   IBM_STG_PASSWORD='your-password-or-token'
   ```
 
-  Then, configure `group_vars/all.yml` to use these credentials:
+  Then, configure `group_vars/all.yml` to use these credentials. You can specify a single registry or a list of registries:
 
   ```yaml
+  # Single registry (legacy format)
   CEPH_REGISTRY_URL: 'cp.stg.icr.io'
   CEPH_REGISTRY_USERNAME: ibm-credentials.env:IBM_CR_USERNAME
   CEPH_REGISTRY_PASSWORD: ibm-credentials.env:IBM_STG_PASSWORD
+
+  # OR Multiple registries
+  CEPH_REGISTRY_LIST:
+    - url: 'cp.stg.icr.io'
+      username: ibm-credentials.env:IBM_CR_USERNAME
+      password: ibm-credentials.env:IBM_STG_PASSWORD
+    - url: 'cp.icr.io'
+      username: ibm-credentials.env:IBM_CR_USERNAME
+      password: ibm-credentials.env:IBM_CR_PASSWORD
   ```
 
   The `file:key` format tells the installer to extract the value of `key` from `file`.
