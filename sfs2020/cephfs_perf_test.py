@@ -207,7 +207,7 @@ class CephFSPerfTest:
         # Cleanup mount points
         self.run_remote(host_name, f"sudo rm -rf {pattern}*")
 
-    def rebuild_filesystem(self, current_settings):
+    def rebuild_filesystem(self, current_settings, results_dir=None):
         # Enable pool deletion once
         self.run_remote(self.admin, "sudo ceph config set mon mon_allow_pool_delete true")
         # Increase max PGs per OSD to avoid ERANGE errors with multiple filesystems
@@ -329,11 +329,11 @@ class CephFSPerfTest:
             self.setup_client_auth(fs)
 
         if self.config.get('ganesha', {}).get('enabled', False):
-            self.provision_ganesha( use_custom_config=True)
+            self.provision_ganesha(use_custom_config=True, results_dir=results_dir)
         
         self.distribute_keys_and_config()
 
-    def provision_ganesha(self, use_custom_config=True):
+    def provision_ganesha(self, use_custom_config=True, results_dir=None):
         print("Provisioning NFS-Ganesha service...")
         svc_id = self.config['ganesha'].get('service_id', 'ganesha')
 
@@ -415,6 +415,34 @@ class CephFSPerfTest:
                 break
             time.sleep(10)
 
+        # After ganesha starts, run 'config diff' via the admin socket and store results in the output directory
+        print("Collecting Ganesha 'config diff' from all ganesha nodes...")
+        if results_dir:
+            self.run_remote(self.admin, f"mkdir -p {results_dir}")
+        for g_host in self.ganeshas:
+            # Find the admin socket
+            cmd = "ls /var/run/ceph/ganesha-*.asok | grep -v 'client.admin.asok' | head -n 1"
+            asok_path = self.run_remote(g_host, cmd).strip()
+            
+            if not asok_path or "No such file or directory" in asok_path:
+                print(f"[{g_host}] Warning: Ganesha admin socket not found for 'config diff'.")
+                continue
+            
+            print(f"[{g_host}] Running 'config diff' via {asok_path}...")
+            diff_output = self.run_remote(g_host, f"sudo ceph --admin-daemon {asok_path} config diff")
+            
+            # Save to output directory (typically /sfs2020 on the admin node, or specific results_dir if provided)
+            filename = f"ganesha_config_diff_{g_host}.json"
+            local_temp = f"/tmp/{filename}"
+            with open(local_temp, 'w') as f:
+                f.write(diff_output)
+            
+            user, host, port = self.get_ssh_details(self.admin)
+            # Use results_dir if provided, otherwise fallback to /sfs2020
+            remote_path = f"{results_dir}/{filename}" if results_dir else f"/sfs2020/{filename}"
+            subprocess.run(["scp", "-o", "StrictHostKeyChecking=no", "-P", port, local_temp, f"{user}@{host}:{remote_path}"])
+            os.remove(local_temp)
+            print(f"[{g_host}] Config diff saved to {self.admin}:{remote_path}")
 
     def cleanup_ganesha(self):
         print("Cleaning up NFS-Ganesha exports and service...")
@@ -758,19 +786,11 @@ class CephFSPerfTest:
         dump_raw = self.run_remote(host_name, f"sudo ceph --admin-daemon {asok_path} perf dump")
         return self.safe_json_load(dump_raw, default=None)
 
-    def run_workload(self, settings, shared_timestamp=None):
-        cmd = self.config['specstorage']['run_command']
-        cfg = self.config['specstorage']['output_path']
-        workload_dir = self.config['specstorage'].get('workload_dir')
+    def get_results_dir(self, settings, shared_timestamp=None):
         results_base_dir = self.config['specstorage'].get('results_base_dir')
-        perf_record_enabled = self.config['specstorage'].get('perf_record', False)
-        
-        payload = settings.copy()
-        payload['fs_name'] = self.fs_name
-        payload['num_filesystems'] = self.num_filesystems
-        if workload_dir:
-            payload['workload_dir'] = workload_dir
-        
+        if not results_base_dir:
+            return None
+
         # Generate run_name and results_dir
         mds_parts = []
         for k, v in sorted(settings.items()):
@@ -794,12 +814,39 @@ class CephFSPerfTest:
             unix_ts = int(now.timestamp())
             full_timestamp = f"{timestamp}-{unix_ts}"
 
+        dir_name = f"{full_timestamp}_{fs_part}_{mds_part}"
+        return os.path.join(results_base_dir, dir_name)
+
+    def run_workload(self, settings, shared_timestamp=None):
+        cmd = self.config['specstorage']['run_command']
+        cfg = self.config['specstorage']['output_path']
+        workload_dir = self.config['specstorage'].get('workload_dir')
+        results_base_dir = self.config['specstorage'].get('results_base_dir')
+        perf_record_enabled = self.config['specstorage'].get('perf_record', False)
+        
+        payload = settings.copy()
+        payload['fs_name'] = self.fs_name
+        payload['num_filesystems'] = self.num_filesystems
+        if workload_dir:
+            payload['workload_dir'] = workload_dir
+        
+        # Generate run_name and results_dir
+        if shared_timestamp:
+            full_timestamp = shared_timestamp
+        else:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            timestamp = now.strftime("%Y%m%d-%H%M%S")
+            unix_ts = int(now.timestamp())
+            full_timestamp = f"{timestamp}-{unix_ts}"
+
+        num_clients = len(self.clients)
+        mounts_per_fs = self.config['specstorage'].get('mounts_per_fs', 1)
+        fs_part = f"{self.fs_name}-x{self.num_filesystems}-c{num_clients}-m{mounts_per_fs}"
         run_name = f"{full_timestamp}_{fs_part}"
         payload['run_name'] = run_name
 
-        if results_base_dir:
-            dir_name = f"{full_timestamp}_{fs_part}_{mds_part}"
-            results_dir = os.path.join(results_base_dir, dir_name)
+        results_dir = self.get_results_dir(settings, full_timestamp)
+        if results_dir:
             payload['results_dir'] = results_dir
 
         settings_json = json.dumps(payload)
@@ -1183,7 +1230,8 @@ class CephFSPerfTest:
             current_settings = dict(zip(keys, values))
             print(f"\n--- Starting Test Iteration: {current_settings} ---")
             
-            self.rebuild_filesystem(current_settings)
+            results_dir = self.get_results_dir(current_settings, shared_timestamp)
+            self.rebuild_filesystem(current_settings, results_dir)
             self.apply_mds_settings(current_settings)
             self.kernel_mount()
             self.prepare_specstorage()
