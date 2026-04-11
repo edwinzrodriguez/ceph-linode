@@ -74,6 +74,23 @@
     when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int >= 9
     ignore_errors: yes
 
+  - name: Fix broken Rocky Linux repositories
+    ansible.builtin.shell:
+      cmd: |
+        if grep -q "http://mirrors.adn.networklayer.com" /etc/yum.repos.d/rocky*.repo; then
+          echo "Detected problematic mirror. Reinstalling rocky-repos..."
+          # Capture current version of rocky-repos
+          VERSION_SPEC=$(rpm -q --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' rocky-repos)
+          # Remove all files added by rocky-repos before reinstalling
+          rpm -ql rocky-repos | grep -E '^/etc/yum.repos.d/.*repo' | xargs rm -f
+          # Download and install official repo package
+          # Note: We use --force and --nodeps to ensure we overwrite the broken ones even if dnf is in a weird state
+          URL="https://download.rockylinux.org/pub/rocky/10/BaseOS/x86_64/os/Packages/r/rocky-repos-${VERSION_SPEC}.rpm"
+          rpm -ivh --force --nodeps ${URL}
+        fi
+    when: ansible_distribution == 'Rocky' and ansible_distribution_major_version | int >= 10
+    ignore_errors: yes
+
   # coredump capture setup
   - name: create crash directory
     file:
@@ -222,6 +239,7 @@
       name:
         - systemtap
         - systemtap-runtime
+        - elfutils-debuginfod-client
       state: present
     when: ansible_distribution_major_version | int >= 10
 
@@ -230,6 +248,26 @@
       cmd: stap-prep
     when: ansible_distribution_major_version | int >= 10
     ignore_errors: yes
+
+  - name: Configure debuginfod for Rocky Linux 10
+    ansible.builtin.copy:
+      dest: /etc/profile.d/debuginfod.sh
+      content: |
+        export DEBUGINFOD_URLS="https://debuginfod.centos.org/ https://debuginfod.fedoraproject.org/"
+      owner: root
+      group: root
+      mode: '0644'
+    when: ansible_distribution == 'Rocky' and ansible_distribution_major_version | int >= 10
+
+  - name: Configure debuginfod for CentOS Stream 10
+    ansible.builtin.copy:
+      dest: /etc/profile.d/debuginfod.sh
+      content: |
+        export DEBUGINFOD_URLS="https://debuginfod.centos.org/"
+      owner: root
+      group: root
+      mode: '0644'
+    when: ansible_distribution == 'CentOS' and ansible_distribution_major_version | int >= 10
 
   # package setup
   # - logrotate needs psmisc for killall
