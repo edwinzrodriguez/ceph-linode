@@ -1,3 +1,0 @@
-[submodule "ceph-perf-test"]
-	path = ceph-perf-test
-	url = git@github.com:edwinzrodriguez/ceph-perf-test.git
