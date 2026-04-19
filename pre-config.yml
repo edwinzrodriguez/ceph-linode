@@ -241,12 +241,12 @@
         - systemtap-runtime
         - elfutils-debuginfod-client
       state: present
-    when: ansible_distribution_major_version | int >= 10
+    when: ansible_distribution_major_version | int >= 9
 
   - name: Run stap-prep
     ansible.builtin.shell:
       cmd: stap-prep
-    when: ansible_distribution_major_version | int >= 10
+    when: ansible_distribution_major_version | int >= 9
     ignore_errors: yes
 
   - name: Configure debuginfod for Rocky Linux 10
