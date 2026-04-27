@@ -364,15 +364,24 @@ class CephIbmCloud:
             result = [i for i in result if cond(i)]
         return result
 
-    def _get_zone(self, machine):
-        if self._zone is not None:
-            return self._zone
-
+    def _get_regions(self, machine):
         choice = machine.get("region") or self.cluster.get("region")
         if not choice:
             raise RuntimeError("cluster.json must include region (zone name)")
 
-        self._zone = choice
+        if isinstance(choice, list):
+            return choice
+        return [choice]
+
+    def _get_zone(self, machine, region=None):
+        if region:
+            return region
+
+        if self._zone is not None:
+            return self._zone
+
+        regions = self._get_regions(machine)
+        self._zone = regions[0]
         return self._zone
 
     def _get_resource_group_id(self):
@@ -396,30 +405,37 @@ class CephIbmCloud:
         raise RuntimeError(f"cannot find resource group: {resource_group_name}")
         return self._resource_group_id
 
-    def _get_vpc(self):
-        if self._vpc is not None:
+    def _get_vpc(self, region=None):
+        if self._vpc is not None and region is None:
             return self._vpc
 
         vpc_config = self.cluster.get("vpc")
         if not vpc_config:
             raise RuntimeError("cluster.json must include vpc")
 
-        region = self.cluster.get("region")
+        current_region = region
+        if current_region is None:
+            if self._zone is not None:
+                current_region = self._zone
+            else:
+                regions = self._get_regions({})
+                current_region = regions[0]
+
         if isinstance(vpc_config, dict):
-            if not region:
+            if not current_region:
                 raise RuntimeError(
                     "cluster.json must include region when vpc is a mapping"
                 )
-            vpc_name = vpc_config.get(region) or vpc_config.get("default")
+            vpc_name = vpc_config.get(current_region) or vpc_config.get("default")
             if not vpc_name:
-                raise RuntimeError(f"cluster.json vpc does not include region {region}")
+                raise RuntimeError(f"cluster.json vpc does not include region {current_region}")
         else:
             vpc_name = vpc_config
 
         region_base = None
-        if region:
-            parts = region.rsplit("-", 1)
-            region_base = parts[0] if len(parts) == 2 and parts[1].isdigit() else region
+        if current_region:
+            parts = current_region.rsplit("-", 1)
+            region_base = parts[0] if len(parts) == 2 and parts[1].isdigit() else current_region
 
         vpcs = self.client.list_vpcs().get_result().get("vpcs", [])
         for vpc in vpcs:
@@ -428,25 +444,27 @@ class CephIbmCloud:
                 if vpc_region and vpc_region != region_base:
                     continue
             if vpc_name in (vpc.get("id"), vpc.get("name")):
-                self._vpc = vpc
-                return self._vpc
+                if region is None:
+                    self._vpc = vpc
+                return vpc
 
         raise RuntimeError(f"cannot find VPC: {vpc_name}")
 
-    def _get_subnet(self, machine):
-        if self._subnet is not None:
+    def _get_subnet(self, machine, region=None):
+        if self._subnet is not None and region is None:
             return self._subnet
 
-        vpc = self._get_vpc()
-        zone = self._get_zone(machine)
+        vpc = self._get_vpc(region=region)
+        zone = self._get_zone(machine, region=region)
         subnets = self.client.list_subnets().get_result().get("subnets", [])
         for subnet in subnets:
             if subnet.get("vpc", {}).get("id") != vpc.get("id"):
                 continue
             if subnet.get("zone", {}).get("name") != zone:
                 continue
-            self._subnet = subnet
-            return self._subnet
+            if region is None:
+                self._subnet = subnet
+            return subnet
 
         raise RuntimeError(
             f"cannot find subnet in VPC {vpc.get('name')} for zone {zone}"
@@ -617,99 +635,149 @@ class CephIbmCloud:
                 deduped_tags.append(t)
         tags = deduped_tags
 
-
         existing = None
         for inst in self.instances():
             if inst.get("name") == label:
                 existing = inst
                 break
 
-        subnet = self._get_subnet(machine)
         if existing:
             logging.info(f"{label}: already exists as {existing.get('id')}")
             instance = existing
+            subnet = self._get_subnet(machine)
         else:
-            profile = self._get_machine_type(machine)
-            image = self._get_machine_image(machine)
-            zone = self._get_zone(machine)
-            vpc = self._get_vpc()
-            resource_group_id = self._get_resource_group_id()
+            regions = self._get_regions(machine)
+            for region in regions:
+                try:
+                    instance = self._do_create_in_region(machine, i, region)
+                    subnet = self._get_subnet(machine, region=region)
+                    break
+                except Exception as e:
+                    # check if e is the specific capacity error
+                    # ApiException might have these details
+                    is_capacity_error = False
+                    if isinstance(e, ApiException):
+                        # The issue description says:
+                        # status is 'failed' with code 'cannot_start_capacity' and message 'Insufficient capacity within the selected zone'
+                        # But ApiException usually happens at creation time if the API rejects it.
+                        # However, sometimes creation succeeds but status becomes 'failed'.
+                        # Let's see how _wait_for_instance_status handles it.
+                        pass
+                    
+                    if "cannot_start_capacity" in str(e) and "Insufficient capacity" in str(e):
+                         is_capacity_error = True
 
-            instance_prototype = {
-                "name": label,
-                "profile": {"name": profile.get("name")},
-                "image": {"id": image.get("id")},
-                "zone": {"name": zone},
-                "vpc": {"id": vpc.get("id")},
-                "primary_network_interface": {"subnet": {"id": subnet.get("id")}},
-                "keys": [{"id": self.ssh_key.get("id")}],
-                "resource_group": {"id": resource_group_id},
-            }
-
-            # Check if this is a bare metal profile
-            is_bare_metal = (
-                profile.get("family") == "bare_metal"
-                or "metal" in profile.get("name", "").lower()
-            )
-
-            if is_bare_metal:
-                # Bare metal servers use a different prototype structure.
-                # 'keys' and 'image' must be placed inside an 'initialization' object.
-                # See: https://cloud.ibm.com/apidocs/vpc#create-bare-metal-server
-                instance_prototype["initialization"] = {
-                    "keys": instance_prototype.pop("keys"),
-                    "image": instance_prototype.pop("image"),
-                }
-
-            root_size = machine.get("root_size")
-            if root_size and not is_bare_metal:
-                capacity_gb = max(1, int(math.ceil(root_size / 1024)))
-                # To specify a custom boot volume size, we use boot_volume_attachment.
-                # According to the IBM Cloud VPC API documentation and SDK:
-                # 1. Provide 'boot_volume_attachment' with 'volume' containing 'capacity' and 'profile'.
-                # 2. Provide the 'image' at the top level of the instance prototype.
-                # 3. DO NOT provide 'image' inside the 'volume' object when image is at the top level.
-
-                # "volume_attachments": [],
-                # "boot_volume_attachment": {
-                #     "volume": {
-                #         "name": "ezr-test-boot-1772538104000",
-                #         "capacity": 250,
-                #         "profile": {
-                #             "name": "general-purpose"
-                #         },
-                #         "user_tags": []
-                #     },
-                #     "delete_volume_on_instance_delete": true
-                # },
-
-                boot_volume_name = f"{label}-boot-{int(time.time() * 1000)}"
-                instance_prototype["volume_attachments"] = []
-                instance_prototype["boot_volume_attachment"] = {
-                    "delete_volume_on_instance_delete": True,
-                    "volume": {
-                        "name": boot_volume_name,
-                        "capacity": capacity_gb,
-                        "profile": {"name": "general-purpose"},
-                        "user_tags": [],
-                    },
-                }
-
-            with releasing(self.create_semaphore):
-                logging.info(f"{label}: creating {profile.get('name')} in {zone}")
-                if is_bare_metal:
-                    # Bare metal creation has a slightly different prototype structure
-                    # notably, it doesn't support boot_volume_attachment in the same way
-                    instance = self.client.create_bare_metal_server(instance_prototype).get_result()
-                else:
-                    instance = self.client.create_instance(instance_prototype).get_result()
+                    if is_capacity_error:
+                        logging.warning(f"{label}: capacity error in {region}, trying next region...")
+                        # If instance was created but failed later, we might need to delete it.
+                        # _do_create_in_region should probably handle deletion if it fails waiting.
+                        if region == regions[-1]:
+                            raise
+                        continue
+                    else:
+                        raise
 
         with releasing(self.config_semaphore):
-            instance = self._wait_for_instance_status(instance.get("id"), "running")
+            # instance and subnet are set from the loop or existing
             self._attach_tags(instance, tags)
             self._ensure_floating_ip(instance)
             instance["_subnet_ipv4_cidr_block"] = subnet.get("ipv4_cidr_block")
             return instance
+
+    def _do_create_in_region(self, machine, i, region):
+        label = f"{machine['prefix']}-{i:03d}"
+        profile = self._get_machine_type(machine)
+        image = self._get_machine_image(machine)
+        zone = region
+        vpc = self._get_vpc(region=region)
+        resource_group_id = self._get_resource_group_id()
+        subnet = self._get_subnet(machine, region=region)
+
+        instance_prototype = {
+            "name": label,
+            "profile": {"name": profile.get("name")},
+            "image": {"id": image.get("id")},
+            "zone": {"name": zone},
+            "vpc": {"id": vpc.get("id")},
+            "primary_network_interface": {"subnet": {"id": subnet.get("id")}},
+            "keys": [{"id": self.ssh_key.get("id")}],
+            "resource_group": {"id": resource_group_id},
+        }
+
+        # Check if this is a bare metal profile
+        is_bare_metal = (
+            profile.get("family") == "bare_metal"
+            or "metal" in profile.get("name", "").lower()
+        )
+
+        if is_bare_metal:
+            instance_prototype["initialization"] = {
+                "keys": instance_prototype.pop("keys"),
+                "image": instance_prototype.pop("image"),
+            }
+
+        root_size = machine.get("root_size")
+        if root_size and not is_bare_metal:
+            capacity_gb = max(1, int(math.ceil(root_size / 1024)))
+            boot_volume_name = f"{label}-boot-{int(time.time() * 1000)}"
+            instance_prototype["volume_attachments"] = []
+            instance_prototype["boot_volume_attachment"] = {
+                "delete_volume_on_instance_delete": True,
+                "volume": {
+                    "name": boot_volume_name,
+                    "capacity": capacity_gb,
+                    "profile": {"name": "general-purpose"},
+                    "user_tags": [],
+                },
+            }
+
+        with releasing(self.create_semaphore):
+            logging.info(f"{label}: creating {profile.get('name')} in {zone}")
+            if is_bare_metal:
+                instance = self.client.create_bare_metal_server(instance_prototype).get_result()
+            else:
+                instance = self.client.create_instance(instance_prototype).get_result()
+
+        try:
+            instance = self._wait_for_instance_status(instance.get("id"), "running")
+        except Exception as e:
+            if "cannot_start_capacity" in str(e):
+                logging.warning(f"{label}: failed with capacity error in {zone}. Deleting and retrying...")
+                instance_id = instance.get("id")
+                self._delete_instance(instance_id, is_bare_metal)
+                self._wait_for_instance_deletion(instance_id, is_bare_metal)
+            raise e
+        
+        return instance
+
+    def _delete_instance(self, instance_id, is_bare_metal=False):
+        try:
+            if is_bare_metal:
+                self.client.delete_bare_metal_server(instance_id)
+            else:
+                self.client.delete_instance(instance_id)
+        except ApiException as e:
+            if e.code == "instance_not_found" or e.status_code == 404:
+                return
+            logging.error(f"Failed to delete instance {instance_id}: {e}")
+        except Exception as e:
+            logging.error(f"Failed to delete instance {instance_id}: {e}")
+
+    def _wait_for_instance_deletion(self, instance_id, is_bare_metal=False, tries=60, delay=10):
+        logging.info(f"Waiting for instance {instance_id} to be deleted...")
+        for _ in range(tries):
+            try:
+                if is_bare_metal:
+                    self.client.get_bare_metal_server(instance_id)
+                else:
+                    self.client.get_instance(instance_id)
+            except ApiException as e:
+                if e.code == "instance_not_found" or e.status_code == 404:
+                    logging.info(f"Instance {instance_id} deleted successfully.")
+                    return
+                raise e
+            time.sleep(delay)
+        raise RuntimeError(f"Timeout waiting for instance {instance_id} deletion")
 
     def _attach_tags(self, instance, tags):
         if not tags:
@@ -770,6 +838,13 @@ class CephIbmCloud:
 
             if instance.get("status") == status:
                 return instance
+
+            # Check for failed status and capacity error
+            if instance.get("status") == "failed":
+                reasons = instance.get("status_reasons", [])
+                for r in reasons:
+                    if r.get("code") == "cannot_start_capacity" and "Insufficient capacity" in r.get("message", ""):
+                        raise RuntimeError(f"cannot_start_capacity: Insufficient capacity for instance {instance_id}")
 
             now = time.time()
             if now - last_update >= 60:
@@ -999,14 +1074,10 @@ class CephIbmCloud:
             iid = i.get("id")
             logging.info(f"destroy {i.get('name')}")
             self._delete_floating_ips(i)
-            try:
-                self.client.delete_instance(iid)
-            except ApiException:
-                # Fallback for bare metal
-                try:
-                    self.client.delete_bare_metal_server(iid)
-                except ApiException:
-                    raise
+            # Determine if bare metal
+            profile_name = i.get("profile", {}).get("name", "").lower()
+            is_bare_metal = "metal" in profile_name
+            self._delete_instance(iid, is_bare_metal)
 
     def _destroy(self, *args, **kwargs):
         try:
@@ -1037,14 +1108,10 @@ class CephIbmCloud:
         with releasing(sema):
             iid = node.get("id")
             self._delete_floating_ips(node)
-            try:
-                self.client.delete_instance(iid)
-            except ApiException:
-                # Fallback for bare metal
-                try:
-                    self.client.delete_bare_metal_server(iid)
-                except ApiException:
-                    raise
+            # Determine if bare metal
+            profile_name = node.get("profile", {}).get("name", "").lower()
+            is_bare_metal = "metal" in profile_name
+            self._delete_instance(iid, is_bare_metal)
             time.sleep(2)
 
     def _nuke(self, *args, **kwargs):
@@ -1288,40 +1355,6 @@ class CephIbmCloud:
         return self.client.create_instance_action(
             instance_id, {"type": action_type}
         ).get_result()
-
-    def _wait_for_instance_status(self, instance_id, status, tries=None, delay=None):
-        if tries is None:
-            tries = self.cluster.get("wait_status_tries", 60)
-        if delay is None:
-            delay = self.cluster.get("wait_status_delay", 10)
-
-        start_time = time.time()
-        last_update = start_time
-
-        for _ in range(tries):
-            try:
-                instance = self.client.get_instance(instance_id).get_result()
-            except ApiException:
-                # Fallback to bare metal if not a virtual instance
-                try:
-                    instance = self.client.get_bare_metal_server(instance_id).get_result()
-                except ApiException:
-                    raise
-
-            if instance.get("status") == status:
-                return instance
-
-            now = time.time()
-            if now - last_update >= 60:
-                elapsed = int((now - start_time) / 60)
-                name = instance.get("name") or instance_id
-                logging.info(
-                    f"Waiting for {name} to reach status {status} (elapsed: {elapsed}m)"
-                )
-                last_update = now
-
-            time.sleep(delay)
-        raise RuntimeError(f"instance {instance_id} did not reach status {status}")
 
     def report(self, **kwargs):
         logging.info(f"report {kwargs}")
