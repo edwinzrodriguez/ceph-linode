@@ -1,0 +1,272 @@
+# Copyright (C) 2020 Red Hat, Inc.
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+# PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Usage:
+#   Backup:  ansible-playbook playbooks/host-files-backup-restore.yml -e action=backup  [-e backup_dir=./host-backups]
+#   Restore: ansible-playbook playbooks/host-files-backup-restore.yml -e action=restore [-e backup_dir=./host-backups]
+#
+# Variables:
+#   action:     "backup" (default) or "restore"
+#   backup_dir: local directory to store/read backups (default: "./host-backups")
+
+---
+
+- hosts: all
+  become: yes
+  vars:
+    action: backup
+    backup_dir: "./host-backups"
+    _host_backup_dir: "{{ backup_dir }}/{{ inventory_hostname }}"
+
+    # Files and directories to back up per user context
+    backup_items:
+      # SSH configuration
+      - src: /root/.ssh/config
+        dest_name: root_ssh_config
+        optional: true
+      - src: /root/.ssh/authorized_keys
+        dest_name: root_ssh_authorized_keys
+        optional: true
+      - src: /root/.ssh/known_hosts
+        dest_name: root_ssh_known_hosts
+        optional: true
+      # root shell config
+      - src: /root/.bashrc
+        dest_name: root_bashrc
+        optional: true
+      - src: /root/.bash_profile
+        dest_name: root_bash_profile
+        optional: true
+      - src: /root/.bash_logout
+        dest_name: root_bash_logout
+        optional: true
+      - src: /root/.bash_history
+        dest_name: root_bash_history
+        optional: true
+      # vpcuser shell config
+      - src: /home/vpcuser/.bashrc
+        dest_name: vpcuser_bashrc
+        optional: true
+      - src: /home/vpcuser/.bash_profile
+        dest_name: vpcuser_bash_profile
+        optional: true
+      - src: /home/vpcuser/.bash_logout
+        dest_name: vpcuser_bash_logout
+        optional: true
+      - src: /home/vpcuser/.bash_history
+        dest_name: vpcuser_bash_history
+        optional: true
+      # vpcuser SSH config
+      - src: /home/vpcuser/.ssh/config
+        dest_name: vpcuser_ssh_config
+        optional: true
+      - src: /home/vpcuser/.ssh/authorized_keys
+        dest_name: vpcuser_ssh_authorized_keys
+        optional: true
+      - src: /home/vpcuser/.ssh/known_hosts
+        dest_name: vpcuser_ssh_known_hosts
+        optional: true
+      # System SSH host config
+      - src: /etc/ssh/sshd_config
+        dest_name: sshd_config
+        optional: false
+      # root eternal history and gdb config
+      - src: /root/.bash_eternal_history
+        dest_name: root_bash_eternal_history
+        optional: true
+      - src: /root/.gdbinit
+        dest_name: root_gdbinit
+        optional: true
+      - src: /root/.gdb_history
+        dest_name: root_gdb_history
+        optional: true
+      - src: /root/.gdb_eternal_history
+        dest_name: root_gdb_eternal_history
+        optional: true
+      # vpcuser eternal history and gdb config
+      - src: /home/vpcuser/.bash_eternal_history
+        dest_name: vpcuser_bash_eternal_history
+        optional: true
+      - src: /home/vpcuser/.gdbinit
+        dest_name: vpcuser_gdbinit
+        optional: true
+      - src: /home/vpcuser/.gdb_history
+        dest_name: vpcuser_gdb_history
+        optional: true
+      - src: /home/vpcuser/.gdb_eternal_history
+        dest_name: vpcuser_gdb_eternal_history
+        optional: true
+      # tmux / screen config
+      - src: /root/.tmux.conf
+        dest_name: root_tmux_conf
+        optional: true
+      - src: /home/vpcuser/.tmux.conf
+        dest_name: vpcuser_tmux_conf
+        optional: true
+      # vim config
+      - src: /root/.vimrc
+        dest_name: root_vimrc
+        optional: true
+      - src: /home/vpcuser/.vimrc
+        dest_name: vpcuser_vimrc
+        optional: true
+
+  tasks:
+
+  # ── BACKUP ────────────────────────────────────────────────────────────────
+
+  - name: create local backup directory per host
+    become: no
+    delegate_to: localhost
+    file:
+      path: "{{ _host_backup_dir }}"
+      state: directory
+      mode: '0750'
+    when: action == 'backup'
+
+  - name: check existence of each source file
+    stat:
+      path: "{{ item.src }}"
+    loop: "{{ backup_items }}"
+    register: backup_stat
+    when: action == 'backup'
+
+  - name: fetch files to local backup directory
+    fetch:
+      src: "{{ item.item.src }}"
+      dest: "{{ _host_backup_dir }}/{{ item.item.dest_name }}"
+      flat: yes
+      fail_on_missing: "{{ not item.item.optional }}"
+    loop: "{{ backup_stat.results }}"
+    when:
+      - action == 'backup'
+      - item.stat.exists
+
+  - name: backup /etc/ssh host keys (directory)
+    synchronize:
+      src: /etc/ssh/
+      dest: "{{ _host_backup_dir }}/etc_ssh/"
+      mode: pull
+      rsync_opts:
+        - "--include=ssh_host_*"
+        - "--exclude=*"
+    when: action == 'backup'
+    ignore_errors: yes
+
+  # ── RESTORE ───────────────────────────────────────────────────────────────
+
+  - name: check local backup directory exists (restore)
+    become: no
+    delegate_to: localhost
+    stat:
+      path: "{{ _host_backup_dir }}"
+    register: backup_dir_stat
+    when: action == 'restore'
+
+  - name: fail if backup directory is missing
+    fail:
+      msg: "Backup directory '{{ _host_backup_dir }}' not found. Run backup first."
+    when:
+      - action == 'restore'
+      - not backup_dir_stat.stat.exists
+
+  - name: ensure parent directories exist for restore targets
+    file:
+      path: "{{ item.src | dirname }}"
+      state: directory
+      mode: '0755'
+    loop: "{{ backup_items }}"
+    when: action == 'restore'
+
+  - name: check which backup files exist locally
+    become: no
+    delegate_to: localhost
+    stat:
+      path: "{{ _host_backup_dir }}/{{ item.dest_name }}"
+    loop: "{{ backup_items }}"
+    register: restore_stat
+    when: action == 'restore'
+
+  - name: restore files to hosts
+    copy:
+      src: "{{ _host_backup_dir }}/{{ item.item.dest_name }}"
+      dest: "{{ item.item.src }}"
+      owner: "{{ 'vpcuser' if 'vpcuser' in item.item.src else 'root' }}"
+      group: "{{ 'vpcuser' if 'vpcuser' in item.item.src else 'root' }}"
+      mode: "{{ '0600' if ('.ssh/' in item.item.src or 'history' in item.item.src) else '0644' }}"
+      backup: yes
+    loop: "{{ restore_stat.results }}"
+    when:
+      - action == 'restore'
+      - item.stat.exists
+
+  - name: restore /etc/ssh host keys
+    become: no
+    delegate_to: localhost
+    stat:
+      path: "{{ _host_backup_dir }}/etc_ssh"
+    register: ssh_keys_backup_stat
+    when: action == 'restore'
+
+  - name: push /etc/ssh host keys back to host
+    synchronize:
+      src: "{{ _host_backup_dir }}/etc_ssh/"
+      dest: /etc/ssh/
+      mode: push
+      rsync_opts:
+        - "--include=ssh_host_*"
+        - "--exclude=*"
+    when:
+      - action == 'restore'
+      - ssh_keys_backup_stat.stat.exists
+    ignore_errors: yes
+
+  - name: set correct permissions on restored ssh host keys
+    file:
+      path: "{{ item }}"
+      owner: root
+      group: root
+      mode: '0600'
+    with_fileglob:
+      - /etc/ssh/ssh_host_*_key
+    when: action == 'restore'
+
+  - name: set correct permissions on restored ssh host public keys
+    file:
+      path: "{{ item }}"
+      owner: root
+      group: root
+      mode: '0644'
+    with_fileglob:
+      - /etc/ssh/ssh_host_*_key.pub
+    when: action == 'restore'
+
+  - name: restore /root/.ssh directory permissions
+    file:
+      path: /root/.ssh
+      state: directory
+      owner: root
+      group: root
+      mode: '0700'
+    when: action == 'restore'
+
+  - name: restore /home/vpcuser/.ssh directory permissions
+    file:
+      path: /home/vpcuser/.ssh
+      state: directory
+      owner: vpcuser
+      group: vpcuser
+      mode: '0700'
+    when: action == 'restore'
+    failed_when: false
