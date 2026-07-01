@@ -210,7 +210,7 @@
       podman login {{ item.url }}
       -u {{ item.username }}
       -p {{ item.password }}
-    loop: "{{ hostvars['localhost']['registry_credentials'] | from_json | default([]) }}"
+    loop: "{{ (hostvars['localhost']['registry_credentials'] | from_json) if 'registry_credentials' in hostvars['localhost'] else [] }}"
     when:
       - item.url | length > 0
       - item.username | length > 0
