@@ -499,7 +499,7 @@ class CephIbmCloud:
         logging.error(
             f"unknown instance profile, choose among:\n{[p.get('name') for p in self._profiles]}"
         )
-        raise RuntimeError("unknown instance profile")
+        raise RuntimeError(f"unknown instance profile {machine.get('type')}")
 
     def _get_machine_image(self, machine):
         if machine.get("image"):
