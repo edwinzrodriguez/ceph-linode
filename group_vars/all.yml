@@ -7,6 +7,12 @@ RELEASE: tentacle
 # CEPHADM_REPO is the branch to actually deploy
 # It can be a dev branch, e.g. CEPHADM_REPO: --dev wip-batrick-testing-20230808.012511
 CEPHADM_REPO: --release tentacle
+# Set to true to install IBM Storage Ceph tooling (adds the IBM dnf repo, installs
+# ibm-storage-ceph-license, accepts the license, and pulls the IBM-flavored `cephadm`).
+# When false (the default), `dnf install cephadm` resolves to community cephadm and
+# CEPH_IMAGE should point at a community image (e.g. quay.io/ceph/ceph:*).
+use_ibm_storage_ceph: false
+
 # Container image to use for cephadm bootstrap (and other cephadm operations when needed)
 CEPH_IMAGE: "quay.io/ceph/ceph:v20.2.0"
 #CEPH_IMAGE: "quay.ceph.io/edrodrig/ceph-v20.2.0:latest"

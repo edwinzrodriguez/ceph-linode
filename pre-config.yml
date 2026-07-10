@@ -168,8 +168,50 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*,thrift*' if ansible_distribution_major_version | int >= 9 else '' }}"
+      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*,thrift*' if (ansible_distribution_major_version | int >= 9 and (use_ibm_storage_ceph | default(false) | bool)) else '' }}"
       state: present
+
+  - name: Download standalone cephadm binary (community mode)
+    ansible.builtin.get_url:
+      url: "https://download.ceph.com/rpm-{{ RELEASE }}/el{{ ansible_distribution_major_version }}/noarch/cephadm"
+      dest: /usr/local/sbin/cephadm-bootstrap
+      owner: root
+      group: root
+      mode: '0755'
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
+  - name: Add community Ceph repository (community mode)
+    ansible.builtin.command:
+      cmd: "/usr/local/sbin/cephadm-bootstrap add-repo {{ CEPHADM_REPO }}"
+      creates: /etc/yum.repos.d/ceph.repo
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
+  # `cephadm add-repo` from the tentacle build points gpgkey at release.gpg,
+  # but download.ceph.com only serves release.asc (release.gpg 404s).
+  - name: Fix ceph.repo gpgkey URL (release.gpg -> release.asc)
+    ansible.builtin.replace:
+      path: /etc/yum.repos.d/ceph.repo
+      regexp: '/keys/release\.gpg'
+      replace: '/keys/release.asc'
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
+  - name: Remove IBM Storage Ceph repository (community mode)
+    ansible.builtin.file:
+      path: /etc/yum.repos.d/ibm-storage-ceph.repo
+      state: absent
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
 
   - name: Add IBM Storage Ceph repository (RHEL/CentOS/Rocky 9/10)
     ansible.builtin.get_url:
@@ -178,13 +220,19 @@
       owner: root
       group: root
       mode: '0644'
-    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
+    when:
+      - use_ibm_storage_ceph | default(false) | bool
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
 
   - name: Install IBM Storage Ceph license (RHEL/CentOS/Rocky 9/10)
     ansible.builtin.command:
       cmd: dnf install -y ibm-storage-ceph-license
       creates: /usr/share/ibm-storage-ceph-license
-    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
+    when:
+      - use_ibm_storage_ceph | default(false) | bool
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
 
   - name: Accept IBM license
     ansible.builtin.file:
@@ -193,7 +241,10 @@
       owner: root
       group: root
       mode: '0755'
-    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
+    when:
+      - use_ibm_storage_ceph | default(false) | bool
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
 
   - name: Touch IBM license accept file
     ansible.builtin.file:
@@ -202,7 +253,10 @@
       owner: root
       group: root
       mode: '0644'
-    when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
+    when:
+      - use_ibm_storage_ceph | default(false) | bool
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
 
   - name: clean up epel-next repo exclude (avoid DuplicateOptionError)
     shell: "if [ -f /etc/yum.repos.d/epel-next.repo ]; then sed -i '/^\\[epel-next\\]/,/^\\[/ { /^exclude=/ d }' /etc/yum.repos.d/epel-next.repo; fi"
@@ -217,7 +271,7 @@
       enabled: yes
       gpgcheck: yes
       gpgkey: "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}"
-      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*,thrift*' if ansible_distribution_major_version | int >= 9 else '' }}"
+      exclude: "python3-grpcio*,grpc-data*{{ ',re2*,parquet-libs*,libarrow*,thrift*' if (ansible_distribution_major_version | int >= 9 and (use_ibm_storage_ceph | default(false) | bool)) else '' }}"
       state: present
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10

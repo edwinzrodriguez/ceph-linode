@@ -148,6 +148,7 @@
     ansible.builtin.dnf:
       name: cephadm
       state: present
+      disablerepo: "{{ [] if (use_ibm_storage_ceph | default(false) | bool) else ['ibm-storage-ceph*'] }}"
     when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
@@ -464,6 +465,7 @@
     ansible.builtin.dnf:
       name: cephadm
       state: present
+      disablerepo: "{{ [] if (use_ibm_storage_ceph | default(false) | bool) else ['ibm-storage-ceph*'] }}"
     when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
