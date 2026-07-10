@@ -181,9 +181,9 @@
     when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: Install IBM Storage Ceph license (RHEL/CentOS/Rocky 9/10)
-    ansible.builtin.dnf:
-      name: ibm-storage-ceph-license
-      state: present
+    ansible.builtin.command:
+      cmd: dnf install -y ibm-storage-ceph-license
+      creates: /usr/share/ibm-storage-ceph-license
     when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
   - name: Accept IBM license
