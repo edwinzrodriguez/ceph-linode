@@ -1,0 +1,175 @@
+# Copyright (C) 2020 Red Hat, Inc.
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# Generate a `linodes` JSON file from the Ansible inventory.
+#
+# Each inventory host/group membership becomes one entry (hosts in multiple
+# groups, e.g. mon+mgr+mds, produce multiple entries sharing the same id).
+#
+# Fields taken from inventory hostvars:
+#   label, ip_private, ip_public, ceph_group, user, key
+# Newly assigned fields:
+#   id    - stable UUID derived from the host label (same host => same id)
+#   group - cluster tag from IBM_GROUP (or -e cluster_group=...)
+#
+# Usage (from repo root):
+#   ansible-playbook -i ansible_inventory playbooks/generate-linodes.yml
+#   ansible-playbook -i ansible_inventory playbooks/generate-linodes.yml \
+#       -e cluster_group=ceph-mygroup -e linodes_file=./linodes
+
+---
+
+- name: Create linodes file from ansible inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    linodes_file: "{{ playbook_dir }}/../linodes"
+    ibm_group_file: "{{ playbook_dir }}/../IBM_GROUP"
+    skip_groups:
+      - all
+      - ungrouped
+  tasks:
+    - name: Resolve cluster group name for linodes.group
+      ansible.builtin.set_fact:
+        resolved_cluster_group: >-
+          {{
+            cluster_group
+            if (cluster_group is defined and (cluster_group | string | length) > 0)
+            else (
+              lookup('file', ibm_group_file, errors='ignore')
+              | default('ceph-local', true)
+              | trim
+            )
+          }}
+
+    - name: Assign a stable id per inventory hostname
+      ansible.builtin.set_fact:
+        host_ids: "{{ host_ids | default({}) | combine({item: 'inv_' ~ (item | to_uuid)}) }}"
+      loop: "{{ groups['all'] | default([]) | sort }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Collect (host, inventory-group) pairs
+      ansible.builtin.set_fact:
+        host_group_pairs: >-
+          {{
+            host_group_pairs | default([])
+            + [{'host': item.1, 'inv_group': item.0.key}]
+          }}
+      with_subelements:
+        - "{{ groups | dict2items | rejectattr('key', 'in', skip_groups) | list }}"
+        - value
+      loop_control:
+        label: "{{ item.0.key }}/{{ item.1 }}"
+
+    - name: Build linodes list from inventory hostvars
+      ansible.builtin.set_fact:
+        linodes: >-
+          {{
+            linodes | default([])
+            + [{
+                'id': host_ids[item.host],
+                'label': item.host,
+                'ip_private': (
+                  hostvars[item.host]['private_ip']
+                  | default(hostvars[item.host]['monitor_address']
+                  | default(hostvars[item.host]['ansible_ssh_host']
+                  | default(hostvars[item.host]['ansible_host']
+                  | default(''))))
+                ),
+                'ip_public': (
+                  hostvars[item.host]['ansible_ssh_host']
+                  | default(hostvars[item.host]['ansible_host']
+                  | default(''))
+                ),
+                'group': resolved_cluster_group,
+                'ceph_group': (
+                  hostvars[item.host]['ceph_group']
+                  | default(item.inv_group)
+                ),
+                'user': (
+                  hostvars[item.host]['ansible_ssh_user']
+                  | default(hostvars[item.host]['ansible_user']
+                  | default('root'))
+                ),
+                'key': (
+                  hostvars[item.host]['ansible_ssh_private_key_file']
+                  | default(hostvars[item.host]['ansible_ssh_private_key_file']
+                  | default('~/.ssh/id_rsa'))
+                )
+              }]
+          }}
+      loop: "{{ host_group_pairs | default([]) }}"
+      loop_control:
+        label: "{{ item.host }} ({{ item.inv_group }})"
+
+    - name: Prefer inventory section as ceph_group (multi-group hosts)
+      # hostvars.ceph_group is last-writer-wins when a host appears in several
+      # sections; the inventory section name is the correct role for each row.
+      ansible.builtin.set_fact:
+        linodes: >-
+          {{
+            linodes | default([])
+            | map('combine', {'ceph_group': item.inv_group})
+            | list
+          }}
+      when: false
+      # placeholder disabled — handled below via rebuild for correctness
+
+    - name: Rebuild linodes with section-based ceph_group
+      ansible.builtin.set_fact:
+        linodes: []
+
+    - name: Build final linodes entries
+      ansible.builtin.set_fact:
+        linodes: >-
+          {{
+            linodes
+            + [{
+                'id': host_ids[item.host],
+                'label': item.host,
+                'ip_private': (
+                  hostvars[item.host]['private_ip']
+                  | default(hostvars[item.host]['monitor_address']
+                  | default(hostvars[item.host]['ansible_ssh_host']
+                  | default(hostvars[item.host]['ansible_host']
+                  | default(''))))
+                ),
+                'ip_public': (
+                  hostvars[item.host]['ansible_ssh_host']
+                  | default(hostvars[item.host]['ansible_host']
+                  | default(''))
+                ),
+                'group': resolved_cluster_group,
+                'ceph_group': item.inv_group,
+                'user': (
+                  hostvars[item.host]['ansible_ssh_user']
+                  | default(hostvars[item.host]['ansible_user']
+                  | default('root'))
+                ),
+                'key': (
+                  hostvars[item.host]['ansible_ssh_private_key_file']
+                  | default('~/.ssh/id_rsa')
+                )
+              }]
+          }}
+      loop: "{{ host_group_pairs | default([]) }}"
+      loop_control:
+        label: "{{ item.host }} ({{ item.inv_group }})"
+
+    - name: Write linodes JSON file
+      ansible.builtin.copy:
+        dest: "{{ linodes_file }}"
+        content: "{{ linodes | to_nice_json }}\n"
+        mode: "0644"
+
+    - name: Report result
+      ansible.builtin.debug:
+        msg: >-
+          Wrote {{ linodes | length }} entries to {{ linodes_file }}
+          (group={{ resolved_cluster_group }})
