@@ -160,6 +160,10 @@
     ignore_errors: yes
     when: ansible_distribution_major_version | int >= 9
 
+  # IBM/RH Ceph ships its own parquet/libarrow/thrift/re2 (el*cp) builds that
+  # conflict with EPEL. Exclude those only in IBM mode.
+  # Community Ceph does *not* ship them and needs EPEL to satisfy
+  # ceph-common → libparquet.so.* (and related) dependencies.
   - name: enable epel repo
     yum_repository:
       name: epel
@@ -276,17 +280,89 @@
     ignore_errors: yes
     when: ansible_distribution_major_version | int < 10
 
-  - name: Update all packages
-    ansible.builtin.dnf:
-      name: "*"
-      state: latest
+  # OS prep only: never upgrade the Ceph stack here. A plain dnf update with
+  # Ceph/IBM/RHCEPH repos enabled fails on RHEL 10, e.g.:
+  # - community Ceph librados/librbd needing liblttng-ust.so.1
+  # - EPEL thrift/parquet vs installed el10cp thrift/parquet conflicts
+  # - cephadm-ansible file conflicts between 4.x and 5.x
+  # ansible dnf disablerepo=*ceph* is not reliable enough (errors still show
+  # packages "from Ceph"), so stash repo files + package excludes instead.
+  - name: OS package update (Ceph stack excluded)
     when: ansible_distribution in ['CentOS', 'RedHat', 'Rocky']
-    register: upgrade_all
+    block:
+      - name: Stash Ceph-related yum repo files during OS update
+        ansible.builtin.shell: |
+          set -eu
+          mkdir -p /etc/yum.repos.d/.disabled-os-update
+          # Community (ceph.repo), IBM, and any other *ceph* file-based repos
+          find /etc/yum.repos.d -maxdepth 1 -type f -iname '*ceph*.repo' -print0 \
+            | xargs -0 -r mv -t /etc/yum.repos.d/.disabled-os-update/
+          # RHSM-managed Ceph repos (rhceph-*-rpms, etc.)
+          : > /etc/yum.repos.d/.disabled-os-update/rhsm-ceph-repos.list
+          if command -v subscription-manager >/dev/null 2>&1; then
+            while read -r rid; do
+              [ -n "${rid}" ] || continue
+              subscription-manager repos --disable="${rid}" || true
+              echo "${rid}" >> /etc/yum.repos.d/.disabled-os-update/rhsm-ceph-repos.list
+            done < <(
+              subscription-manager repos --list-enabled 2>/dev/null \
+                | awk -F': ' '/Repo ID:/{print $2}' \
+                | grep -iE 'ceph|rhceph' || true
+            )
+          fi
+        args:
+          executable: /bin/bash
+
+      - name: Update all packages
+        ansible.builtin.dnf:
+          name: "*"
+          state: latest
+          # Do not touch Ceph packages or shared libs that conflict across
+          # community / IBM / EPEL stacks during OS prep.
+          exclude:
+            - ceph
+            - ceph.*
+            - ceph-*
+            - librados*
+            - librbd*
+            - librgw*
+            - libceph*
+            - python3-ceph*
+            - python3-rados*
+            - python3-rbd*
+            - python3-rgw*
+            - cephadm*
+            - thrift
+            - thrift*
+            - parquet-libs*
+            - libarrow*
+            - re2*
+        register: upgrade_all
+
+    always:
+      - name: Restore Ceph-related yum repos after OS update
+        ansible.builtin.shell: |
+          set -eu
+          if [ -d /etc/yum.repos.d/.disabled-os-update ]; then
+            find /etc/yum.repos.d/.disabled-os-update -maxdepth 1 -type f -name '*.repo' -print0 \
+              | xargs -0 -r mv -t /etc/yum.repos.d/
+          fi
+          if [ -f /etc/yum.repos.d/.disabled-os-update/rhsm-ceph-repos.list ]; then
+            while read -r rid; do
+              [ -n "${rid}" ] || continue
+              subscription-manager repos --enable="${rid}" 2>/dev/null || true
+            done < /etc/yum.repos.d/.disabled-os-update/rhsm-ceph-repos.list
+          fi
+        args:
+          executable: /bin/bash
 
   - name: Reboot nodes after update
     ansible.builtin.reboot:
       reboot_timeout: 300
-    when: upgrade_all.changed
+    when:
+      - ansible_distribution in ['CentOS', 'RedHat', 'Rocky']
+      - upgrade_all is defined
+      - upgrade_all is changed
 
   - name: Install systemtap and related packages
     ansible.builtin.dnf:

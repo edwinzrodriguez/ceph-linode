@@ -151,6 +151,68 @@
       disablerepo: "{{ [] if (use_ibm_storage_ceph | default(false) | bool) else ['ibm-storage-ceph*'] }}"
     when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
 
+  # Community ceph-common needs EPEL for parquet/libarrow/thrift. A prior
+  # pre-config (or leftover epel.repo) may still exclude them from EPEL even
+  # when use_ibm_storage_ceph is false — clear those excludes first.
+  - name: Ensure EPEL allows Ceph host deps (community mode)
+    ansible.builtin.shell: |
+      set -e
+      for f in /etc/yum.repos.d/epel.repo /etc/yum.repos.d/epel-next.repo; do
+        [ -f "$f" ] || continue
+        # Remove only the Ceph-related package excludes; leave grpc excludes alone.
+        sed -i \
+          -e 's/,re2\*,parquet-libs\*,libarrow\*,thrift\*//g' \
+          -e 's/re2\*,parquet-libs\*,libarrow\*,thrift\*,//g' \
+          -e 's/re2\*,parquet-libs\*,libarrow\*,thrift\*//g' \
+          "$f"
+      done
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
+  # librbd1/librados2 (via *_tp) need liblttng-ust.so.1 from lttng-ust.
+  # On Rocky/RHEL that package often lives in CRB / CodeReady Builder, which
+  # is not enabled by default — without it dnf reports "nothing provides".
+  - name: Enable CRB / CodeReady Builder for community Ceph deps (el9+)
+    ansible.builtin.shell: |
+      set -e
+      major="{{ ansible_distribution_major_version }}"
+      arch="$(uname -m)"
+      if [ "{{ ansible_distribution }}" = "RedHat" ]; then
+        if command -v subscription-manager >/dev/null 2>&1; then
+          subscription-manager repos \
+            --enable "codeready-builder-for-rhel-${major}-${arch}-rpms" || true
+        fi
+        dnf config-manager --set-enabled \
+          "codeready-builder-for-rhel-${major}-${arch}-rpms" 2>/dev/null || true
+      else
+        # CentOS Stream / Rocky: CRB
+        dnf config-manager --set-enabled crb 2>/dev/null \
+          || dnf config-manager --set-enabled CRB 2>/dev/null \
+          || true
+      fi
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
+  # Install deps via dnf first so failures are clear and cephadm's yum call
+  # does not hit exclude/missing-provider errors mid-install.
+  - name: Install community Ceph host package dependencies (el9+)
+    ansible.builtin.dnf:
+      name:
+        - parquet-libs
+        - libarrow
+        - thrift
+        - lttng-ust
+      state: present
+      disablerepo: "{{ [] if (use_ibm_storage_ceph | default(false) | bool) else ['ibm-storage-ceph*'] }}"
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
   - name: "install {{ RELEASE }}"
     shell: "cephadm install ceph-common"
 
@@ -220,9 +282,35 @@
 - hosts: mons
   become: yes
   tasks:
-  - name: limit to first mon host
-    when: inventory_hostname != groups['mons'][0]
+  # Prefer groups['mons'][0], but only among hosts still active in this play.
+  # Previously this always used groups['mons'][0]; if that host failed earlier,
+  # every remaining mon hit end_host and bootstrap was silently skipped.
+  - name: Select bootstrap mon (first mon still available)
+    ansible.builtin.set_fact:
+      bootstrap_mon: "{{ (groups['mons'] | intersect(ansible_play_hosts) | list) | first | default('', true) }}"
+
+  - name: Fail if no mon is available for bootstrap
+    ansible.builtin.assert:
+      that:
+        - bootstrap_mon | length > 0
+      fail_msg: >-
+        No mon hosts are available for bootstrap. Preferred mon is
+        '{{ groups['mons'][0] }}'. Fix earlier play failures and re-run.
+    run_once: true
+
+  - name: Warn when preferred first mon is unavailable
+    ansible.builtin.debug:
+      msg: >-
+        Preferred bootstrap mon '{{ groups['mons'][0] }}' is not available
+        in this play (likely failed earlier). Bootstrapping on
+        '{{ bootstrap_mon }}' instead.
+    when: bootstrap_mon != groups['mons'][0]
+    run_once: true
+
+  - name: limit to bootstrap mon host
+    when: inventory_hostname != bootstrap_mon
     meta: end_host
+
   - name: reset cluster.spec (avoid mixed/invalid YAML from previous runs)
     file:
       path: "{{ ssh_user_home }}/cluster.spec"
@@ -411,7 +499,10 @@
       --ssh-public-key {{ ssh_user_home }}/.ssh/id_ed25519.pub
       --apply-spec {{ ssh_user_home }}/cluster.spec
       --skip-mon-network
-    when: not ceph_installed.stat.exists
+    when:
+      - inventory_hostname == bootstrap_mon
+      - not ceph_installed.stat.exists
+    run_once: true
 
   - name: config public network
     shell: "ceph config set global public_network {{ hostvars[groups['mons'][0]]['public_network'] }}"
@@ -467,6 +558,58 @@
       state: present
       disablerepo: "{{ [] if (use_ibm_storage_ceph | default(false) | bool) else ['ibm-storage-ceph*'] }}"
     when: ansible_distribution in ["RedHat", "CentOS", "Rocky"] and ansible_distribution_major_version | int >= 9
+
+  - name: Ensure EPEL allows Ceph host deps (community mode)
+    ansible.builtin.shell: |
+      set -e
+      for f in /etc/yum.repos.d/epel.repo /etc/yum.repos.d/epel-next.repo; do
+        [ -f "$f" ] || continue
+        sed -i \
+          -e 's/,re2\*,parquet-libs\*,libarrow\*,thrift\*//g' \
+          -e 's/re2\*,parquet-libs\*,libarrow\*,thrift\*,//g' \
+          -e 's/re2\*,parquet-libs\*,libarrow\*,thrift\*//g' \
+          "$f"
+      done
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
+  - name: Enable CRB / CodeReady Builder for community Ceph deps (el9+)
+    ansible.builtin.shell: |
+      set -e
+      major="{{ ansible_distribution_major_version }}"
+      arch="$(uname -m)"
+      if [ "{{ ansible_distribution }}" = "RedHat" ]; then
+        if command -v subscription-manager >/dev/null 2>&1; then
+          subscription-manager repos \
+            --enable "codeready-builder-for-rhel-${major}-${arch}-rpms" || true
+        fi
+        dnf config-manager --set-enabled \
+          "codeready-builder-for-rhel-${major}-${arch}-rpms" 2>/dev/null || true
+      else
+        dnf config-manager --set-enabled crb 2>/dev/null \
+          || dnf config-manager --set-enabled CRB 2>/dev/null \
+          || true
+      fi
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
+
+  - name: Install community Ceph host package dependencies (el9+)
+    ansible.builtin.dnf:
+      name:
+        - parquet-libs
+        - libarrow
+        - thrift
+        - lttng-ust
+      state: present
+      disablerepo: "{{ [] if (use_ibm_storage_ceph | default(false) | bool) else ['ibm-storage-ceph*'] }}"
+    when:
+      - not (use_ibm_storage_ceph | default(false) | bool)
+      - ansible_distribution in ["RedHat", "CentOS", "Rocky"]
+      - ansible_distribution_major_version | int >= 9
 
   - name: "install {{ RELEASE }}"
     shell: "cephadm install ceph-common ceph-fuse"
