@@ -351,9 +351,11 @@ class CephIbmCloud:
             return []
 
         # Resolve CRNs -> instance/bare metal objects
-        instances = self.client.list_instances().get_result().get("instances", [])
+        instances = self._list_all(self.client.list_instances, "instances")
         try:
-            bare_metals = self.client.list_bare_metal_servers().get_result().get("servers", [])
+            bare_metals = self._list_all(
+                self.client.list_bare_metal_servers, "bare_metal_servers"
+            )
             instances.extend(bare_metals)
         except (ApiException, AttributeError):
             pass
