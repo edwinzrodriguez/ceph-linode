@@ -619,23 +619,140 @@ class CephIbmCloud:
             raise RuntimeError(f"node definition missing 'group'/'groups': {machine}")
         return groups[0]
 
-    @busy_retry(EAgain)
-    def _do_create(self, machine, i):
-        label = f"{machine['prefix']}-{i:03d}"
+    def _node_label(self, machine, i):
+        return f"{machine['prefix']}-{i:03d}"
 
+    def _iter_cluster_nodes(self):
+        for machine in self.cluster["nodes"]:
+            for i in range(machine["count"]):
+                yield machine, i
+
+    def _instance_tags(self, machine):
         node_groups = self._node_groups(machine)
-        primary_group = self._primary_group(machine)
-
-        # Tag the instance with:
-        #   - the cluster tag (self.group)
-        #   - one "<cluster>-<group>" tag for EACH group the node belongs to
         tags = [self.group] + [f"{self.group}-{g}" for g in node_groups]
-        # de-dupe while preserving order
         deduped_tags = []
         for t in tags:
             if t and t not in deduped_tags:
                 deduped_tags.append(t)
-        tags = deduped_tags
+        return deduped_tags
+
+    def _finalize_instance(self, machine, instance, subnet=None):
+        if subnet is None:
+            subnet = self._get_subnet(machine)
+        with releasing(self.config_semaphore):
+            self._attach_tags(instance, self._instance_tags(machine))
+            self._ensure_floating_ip(instance)
+            instance["_subnet_ipv4_cidr_block"] = subnet.get("ipv4_cidr_block")
+        return instance
+
+    @staticmethod
+    def _network_cidr(ip):
+        if not ip or ip == "-":
+            return "-"
+        parts = ip.split(".")
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+        return ip
+
+    def _inventory_group_order(self, groups):
+        priority = ("mons", "mgrs", "mdss")
+        ordered = [g for g in priority if g in groups]
+        ordered.extend(sorted(g for g in groups if g not in priority))
+        return ordered
+
+    def _write_inventory(self, instances):
+        ibm_nodes = []
+        groups = set()
+        for node in self.cluster["nodes"]:
+            for g in self._node_groups(node):
+                groups.add(g)
+
+        with open("ansible_inventory", mode="w") as f:
+            for group in self._inventory_group_order(groups):
+                f.write(f"[{group}]\n")
+                group_tag = f"{self.group}-{group}"
+                for ibmnode in instances:
+                    if group_tag not in ibmnode.get("tags", []):
+                        continue
+                    private_ip = (
+                        ibmnode.get("primary_network_interface", {})
+                        .get("primary_ip", {})
+                        .get("address")
+                    )
+                    fip_name = self._floating_ip_name(ibmnode)
+                    floating_ip = self._get_floating_ip(
+                        ibmnode.get("primary_network_interface", {}).get("id"),
+                        name=fip_name,
+                    )
+                    public_ip = floating_ip.get("address") if floating_ip else private_ip
+                    public_network_cidr = self._network_cidr(public_ip)
+                    cluster_network_cidr = ibmnode.get("_subnet_ipv4_cidr_block", "-")
+
+                    f.write(
+                        f"\t{ibmnode.get('name')} "
+                        f"ansible_ssh_host={public_ip} ansible_ssh_port=22 "
+                        f"ansible_ssh_user='{self.ansible_ssh_user}' "
+                        f"ansible_ssh_private_key_file='{self.ssh_user_home}/.ssh/id_rsa' "
+                        f"ceph_group='{group}' "
+                        f"public_network='{public_network_cidr}' "
+                        f"cluster_network='{cluster_network_cidr}' "
+                        f"private_ip='{private_ip}'"
+                    )
+                    if group == "mons":
+                        f.write(f" monitor_address={private_ip}")
+                    f.write("\n")
+
+                    ibm_nodes.append(
+                        {
+                            "id": ibmnode.get("id"),
+                            "label": ibmnode.get("name"),
+                            "ip_private": private_ip,
+                            "ip_public": public_ip,
+                            "group": self.group,
+                            "ceph_group": group,
+                            "user": self.ansible_ssh_user,
+                            "key": self.ssh_user_home + "/.ssh/id_rsa",
+                        }
+                    )
+
+        with open("linodes", mode="w") as f:
+            f.write(json.dumps(ibm_nodes, indent=4))
+
+    def _gather_cluster_instances(self, existing_by_name=None, created_by_name=None):
+        if existing_by_name is None:
+            existing_by_name = {
+                inst.get("name"): inst
+                for inst in self.instances()
+                if inst.get("name")
+            }
+        if created_by_name is None:
+            created_by_name = {}
+
+        instances_by_name = dict(created_by_name)
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            futures = {}
+            for machine, i in self._iter_cluster_nodes():
+                label = self._node_label(machine, i)
+                if label in instances_by_name:
+                    continue
+                if label in existing_by_name:
+                    futures[label] = executor.submit(
+                        self._finalize_instance, machine, existing_by_name[label]
+                    )
+                else:
+                    raise RuntimeError(f"missing instance {label}")
+
+            for label, future in futures.items():
+                instances_by_name[label] = future.result()
+
+        return [
+            instances_by_name[self._node_label(machine, i)]
+            for machine, i in self._iter_cluster_nodes()
+        ]
+
+    @busy_retry(EAgain)
+    def _do_create(self, machine, i):
+        label = self._node_label(machine, i)
 
         existing = None
         for inst in self.instances():
@@ -679,12 +796,7 @@ class CephIbmCloud:
                     else:
                         raise
 
-        with releasing(self.config_semaphore):
-            # instance and subnet are set from the loop or existing
-            self._attach_tags(instance, tags)
-            self._ensure_floating_ip(instance)
-            instance["_subnet_ipv4_cidr_block"] = subnet.get("ipv4_cidr_block")
-            return instance
+        return self._finalize_instance(machine, instance, subnet=subnet)
 
     def _do_create_in_region(self, machine, i, region):
         label = f"{machine['prefix']}-{i:03d}"
@@ -978,12 +1090,29 @@ class CephIbmCloud:
         logging.info(f"launch {kwargs}")
         self._parse_common_options(**kwargs)
 
-        running = []
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            count = 0
-            for machine in self.cluster["nodes"]:
-                primary_group = self._primary_group(machine)
-                for i in range(machine["count"]):
+        existing_by_name = {
+            inst.get("name"): inst
+            for inst in self.instances()
+            if inst.get("name")
+        }
+
+        to_create = []
+        for machine, i in self._iter_cluster_nodes():
+            label = self._node_label(machine, i)
+            if label not in existing_by_name:
+                to_create.append((machine, i))
+            else:
+                logging.info(
+                    f"{label}: already exists as {existing_by_name[label].get('id')}, skipping creation"
+                )
+
+        created_by_name = {}
+        if to_create:
+            running = []
+            with ThreadPoolExecutor(max_workers=50) as executor:
+                count = 0
+                for machine, i in to_create:
+                    primary_group = self._primary_group(machine)
                     logging.info(f"creating node {primary_group}.{i}")
                     running.append(executor.submit(self._create, machine, i))
                     count += 1
@@ -991,84 +1120,26 @@ class CephIbmCloud:
                         # slow ramp up
                         time.sleep(10)
 
-        logging.info(f"launch results: {[f.result() for f in running]}")
-
-        with ThreadPoolExecutor(max_workers=50) as executor:
             for future in running:
-                executor.submit(self._ensure_root_authorized_keys, future.result())
+                instance = future.result()
+                created_by_name[instance.get("name")] = instance
 
-        ibm_nodes = []
-        with open("ansible_inventory", mode="w") as f:
-            # Allow nodes to belong to multiple groups; build the set of all groups
-            groups = set()
-            for node in self.cluster["nodes"]:
-                for g in self._node_groups(node):
-                    groups.add(g)
+            logging.info(f"launch results: {list(created_by_name.keys())}")
 
-            for group in groups:
-                f.write(f"[{group}]\n")
-                group_tag = f"{self.group}-{group}"
-                for future in running:
-                    ibmnode = future.result()
-                    if group_tag in ibmnode.get("tags", []):
-                        private_ip = (
-                            ibmnode.get("primary_network_interface", {})
-                            .get("primary_ip", {})
-                            .get("address")
-                        )
-                        fip_name = self._floating_ip_name(ibmnode)
-                        floating_ip = self._get_floating_ip(
-                            ibmnode.get("primary_network_interface", {}).get("id"),
-                            name=fip_name,
-                        )
-                        public_ip = floating_ip.get("address") if floating_ip else private_ip
-                        # The public network CIDR should be from the public IP (floating IP)
-                        # We'll use /32 for individual public IPs if we can't determine the subnet CIDR for it easily
-                        # but often it's requested as a network.
-                        # For now, let's use the public IP with /24 as a common placeholder or /32 if we want to be exact.
-                        # The requirement says "network cidr of ip_public".
-                        # If we have a public IP 13.120.93.243, the /24 network is 13.120.93.0/24.
-                        
-                        def get_network_cidr(ip):
-                            if not ip or ip == "-":
-                                return "-"
-                            parts = ip.split(".")
-                            if len(parts) == 4:
-                                return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
-                            return ip
+            with ThreadPoolExecutor(max_workers=50) as executor:
+                for instance in created_by_name.values():
+                    executor.submit(self._ensure_root_authorized_keys, instance)
+        else:
+            logging.info("all cluster nodes already exist, skipping creation")
 
-                        public_network_cidr = get_network_cidr(public_ip)
-                        cluster_network_cidr = ibmnode.get("_subnet_ipv4_cidr_block", "-")
+        instances = self._gather_cluster_instances(existing_by_name, created_by_name)
+        self._write_inventory(instances)
 
-                        # For backwards compatibility, keep ceph_group as the current INI section name
-                        f.write(
-                            f"\t{ibmnode.get('name')} "
-                            f"ansible_ssh_host={public_ip} ansible_ssh_port=22 "
-                            f"ansible_ssh_user='{self.ansible_ssh_user}' "
-                            f"ansible_ssh_private_key_file='{self.ssh_user_home}/.ssh/id_rsa' "
-                            f"ceph_group='{group}' "
-                            f"public_network='{public_network_cidr}' "
-                            f"cluster_network='{cluster_network_cidr}' "
-                            f"private_ip='{private_ip}'"
-                        )
-                        if group == "mons":
-                            f.write(f" monitor_address={private_ip}")
-                        f.write("\n")
-
-                        l = {
-                            "id": ibmnode.get("id"),
-                            "label": ibmnode.get("name"),
-                            "ip_private": private_ip,
-                            "ip_public": public_ip,
-                            "group": self.group,
-                            "ceph_group": group,
-                            "user": self.ansible_ssh_user,
-                            "key": self.ssh_user_home + "/.ssh/id_rsa",
-                        }
-                        ibm_nodes.append(l)
-
-        with open("linodes", mode="w") as f:
-            f.write(json.dumps(ibm_nodes, indent=4))
+    def update_inventory(self, **kwargs):
+        logging.info(f"update_inventory {kwargs}")
+        self._parse_common_options(**kwargs)
+        instances = self._gather_cluster_instances()
+        self._write_inventory(instances)
 
     @busy_retry()
     def _do_destroy(self):
@@ -1516,6 +1587,7 @@ def main(argv):
     subparsers = parser.add_subparsers(dest="cmd")
 
     subparsers.add_parser("launch")
+    subparsers.add_parser("update_inventory")
     subparsers.add_parser("destroy")
     subparsers.add_parser("nuke")
     subparsers.add_parser("wait")
