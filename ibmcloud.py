@@ -1397,6 +1397,12 @@ class CephIbmCloud:
     def _instance_name(self, inst):
         return inst.get("name") or inst.get("id") or "<unknown>"
 
+    def _is_bare_metal_instance(self, inst):
+        profile = inst.get("profile") or {}
+        if profile.get("family") == "bare_metal":
+            return True
+        return "metal" in profile.get("name", "").lower()
+
     @busy_retry()
     def _do_instance_action(self, instance_id, action_type):
         """
@@ -1428,6 +1434,42 @@ class CephIbmCloud:
         return self.client.create_instance_action(
             instance_id, {"type": action_type}
         ).get_result()
+
+    @busy_retry()
+    def _do_bare_metal_action(self, server_id, action_type, stop_type="soft"):
+        """
+        Start/stop/reboot a bare metal server.
+
+        IBM VPC SDK versions differ:
+          - start_bare_metal_server / stop_bare_metal_server / restart_bare_metal_server
+          - create_bare_metal_server_action (older)
+        """
+        if action_type not in ("start", "stop", "reboot"):
+            raise ValueError(f"invalid bare metal action: {action_type}")
+
+        if action_type == "start" and hasattr(self.client, "start_bare_metal_server"):
+            return self.client.start_bare_metal_server(server_id).get_result()
+        if action_type == "stop" and hasattr(self.client, "stop_bare_metal_server"):
+            return self.client.stop_bare_metal_server(server_id, type=stop_type).get_result()
+        if action_type == "reboot" and hasattr(self.client, "restart_bare_metal_server"):
+            return self.client.restart_bare_metal_server(server_id).get_result()
+
+        if hasattr(self.client, "create_bare_metal_server_action"):
+            try:
+                return self.client.create_bare_metal_server_action(
+                    server_id, type=action_type
+                ).get_result()
+            except TypeError:
+                body = {"type": action_type}
+                if action_type == "stop":
+                    body["stop_type"] = stop_type
+                return self.client.create_bare_metal_server_action(
+                    server_id, body
+                ).get_result()
+
+        raise RuntimeError(
+            f"bare metal {action_type} not supported by installed ibm_vpc SDK"
+        )
 
     def report(self, **kwargs):
         logging.info(f"report {kwargs}")
@@ -1519,11 +1561,14 @@ class CephIbmCloud:
                 return
 
             try:
-                current = self.client.get_instance(iid).get_result()
-                is_bare_metal = False
-            except ApiException:
-                current = self.client.get_bare_metal_server(iid).get_result()
-                is_bare_metal = True
+                is_bare_metal = self._is_bare_metal_instance(inst)
+                if is_bare_metal:
+                    current = self.client.get_bare_metal_server(iid).get_result()
+                else:
+                    current = self.client.get_instance(iid).get_result()
+            except ApiException as e:
+                logging.warning(f"{name}: failed to get status: {e}")
+                return
 
             if current.get("status") in ("stopped", "stopping"):
                 logging.info(f"{name}: already {current.get('status')}")
@@ -1531,7 +1576,7 @@ class CephIbmCloud:
 
             logging.info(f"{name}: stopping")
             if is_bare_metal:
-                self.client.create_bare_metal_server_action(iid, type="stop")
+                self._do_bare_metal_action(iid, "stop")
             else:
                 self._do_instance_action(iid, "stop")
             self._wait_for_instance_status(iid, "stopped")
@@ -1554,11 +1599,14 @@ class CephIbmCloud:
                 return
 
             try:
-                current = self.client.get_instance(iid).get_result()
-                is_bare_metal = False
-            except ApiException:
-                current = self.client.get_bare_metal_server(iid).get_result()
-                is_bare_metal = True
+                is_bare_metal = self._is_bare_metal_instance(inst)
+                if is_bare_metal:
+                    current = self.client.get_bare_metal_server(iid).get_result()
+                else:
+                    current = self.client.get_instance(iid).get_result()
+            except ApiException as e:
+                logging.warning(f"{name}: failed to get status: {e}")
+                return
 
             if current.get("status") in ("running", "starting"):
                 logging.info(f"{name}: already {current.get('status')}")
@@ -1566,7 +1614,7 @@ class CephIbmCloud:
 
             logging.info(f"{name}: starting")
             if is_bare_metal:
-                self.client.create_bare_metal_server_action(iid, type="start")
+                self._do_bare_metal_action(iid, "start")
             else:
                 self._do_instance_action(iid, "start")
             self._wait_for_instance_status(iid, "running")
