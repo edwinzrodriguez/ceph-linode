@@ -512,12 +512,24 @@
       - hostvars[groups['mons'][0]]['public_network'] != hostvars[groups['mons'][0]]['cluster_network']
       - hostvars[groups['mons'][0]]['public_network'].split('.')[0:3] | join('.') in ansible_all_ipv4_addresses | map('regex_replace', '^(.*)\..*$', '\\1') | list
 
+  - name: gather unique cluster networks
+    set_fact:
+      ceph_cluster_networks: >-
+        {{
+          groups['all']
+          | map('extract', hostvars, 'cluster_network')
+          | select('defined')
+          | map('trim')
+          | reject('equalto', '')
+          | reject('equalto', '-')
+          | list
+          | unique
+        }}
+
   - name: config cluster_network
-    shell: "ceph config set global cluster_network {{ hostvars[groups['mons'][0]]['cluster_network'] }}"
+    shell: "ceph config set global cluster_network {{ ceph_cluster_networks | join(',') }}"
     when:
-      - hostvars[groups['mons'][0]]['cluster_network'] is defined
-      - hostvars[groups['mons'][0]]['cluster_network'] != "-"
-      - hostvars[groups['mons'][0]]['cluster_network'].split('.')[0:3] | join('.') in ansible_all_ipv4_addresses | map('regex_replace', '^(.*)\..*$', '\\1') | list
+      - ceph_cluster_networks | length > 0
 
   - name: log to files
     shell: ceph config set global log_to_file true

@@ -472,6 +472,30 @@ class CephIbmCloud:
             f"cannot find subnet in VPC {vpc.get('name')} for zone {zone}"
         )
 
+    def _get_instance_subnet(self, instance):
+        ni = instance.get("primary_network_interface") or {}
+        subnet_id = (ni.get("subnet") or {}).get("id")
+        if not subnet_id:
+            return None
+
+        cache = getattr(self, "_subnet_by_id_cache", None)
+        if cache is None:
+            self._subnet_by_id_cache = {}
+            cache = self._subnet_by_id_cache
+
+        if subnet_id in cache:
+            return cache[subnet_id]
+
+        subnet = self.client.get_subnet(subnet_id).get_result()
+        cache[subnet_id] = subnet
+        return subnet
+
+    def _instance_subnet_cidr(self, instance):
+        subnet = self._get_instance_subnet(instance)
+        if subnet and subnet.get("ipv4_cidr_block"):
+            return subnet.get("ipv4_cidr_block")
+        return self._network_cidr(self._instance_private_ip(instance))
+
     def _get_machine_type(self, machine):
         if self._profiles is None:
             # Consolidate virtual server profiles and bare metal profiles
@@ -638,7 +662,10 @@ class CephIbmCloud:
 
     def _finalize_instance(self, machine, instance, subnet=None):
         if subnet is None:
-            subnet = self._get_subnet(machine)
+            subnet = self._get_instance_subnet(instance)
+        if subnet is None:
+            zone = (instance.get("zone") or {}).get("name")
+            subnet = self._get_subnet(machine, region=zone)
         with releasing(self.config_semaphore):
             self._attach_tags(instance, self._instance_tags(machine))
             self._ensure_floating_ip(instance)
@@ -686,7 +713,7 @@ class CephIbmCloud:
                     )
                     public_ip = floating_ip.get("address") if floating_ip else private_ip
                     public_network_cidr = self._network_cidr(public_ip)
-                    cluster_network_cidr = ibmnode.get("_subnet_ipv4_cidr_block", "-")
+                    cluster_network_cidr = self._instance_subnet_cidr(ibmnode)
 
                     f.write(
                         f"\t{ibmnode.get('name')} "
@@ -763,7 +790,10 @@ class CephIbmCloud:
         if existing:
             logging.info(f"{label}: already exists as {existing.get('id')}")
             instance = existing
-            subnet = self._get_subnet(machine)
+            subnet = self._get_instance_subnet(instance)
+            if subnet is None:
+                zone = (instance.get("zone") or {}).get("name")
+                subnet = self._get_subnet(machine, region=zone)
         else:
             regions = self._get_regions(machine)
             for region in regions:
