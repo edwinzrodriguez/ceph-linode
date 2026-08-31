@@ -43,7 +43,10 @@ class EAgain(RuntimeError):
         return "EAgain"
 
 
-def busy_retry(exceptions=[], tries=20, delay=30):
+def busy_retry(exceptions=(), tries=20, delay=30):
+    if not isinstance(exceptions, tuple):
+        exceptions = (exceptions,) if exceptions else ()
+
     def wrapper(f):
         def wrapped(*args, **kwargs):
             for i in range(tries - 1):
@@ -56,9 +59,12 @@ def busy_retry(exceptions=[], tries=20, delay=30):
                         time.sleep(delay)
                     else:
                         raise
-                except exceptions as e:
-                    logging.warning(f"retrying due to expected exception: {e}")
-                    time.sleep(delay)
+                except Exception as e:
+                    if exceptions and isinstance(e, exceptions):
+                        logging.warning(f"retrying due to expected exception: {e}")
+                        time.sleep(delay)
+                    else:
+                        raise
             return f(*args, **kwargs)
 
         return wrapped
@@ -173,6 +179,43 @@ class CephIbmCloud:
         self._client = VpcV1(authenticator=authenticator)
         self._client.set_service_url(service_url)
         return self._client
+
+    def _vpc_request(self, method, path, json_body=None):
+        creds = self.credentials
+        service_url = creds.get("VPC_URL", "").rstrip("/")
+        if not service_url:
+            raise RuntimeError("VPC_URL must be set in credentials file")
+
+        token = self.tagging.authenticator.token_manager.get_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        params = {}
+        version = getattr(self.client, "version", None)
+        generation = getattr(self.client, "generation", None)
+        if version:
+            params["version"] = version
+        if generation:
+            params["generation"] = generation
+
+        url = f"{service_url}{path}"
+        resp = requests.request(
+            method,
+            url,
+            headers=headers,
+            params=params,
+            json=json_body,
+            timeout=120,
+        )
+        if not resp.ok:
+            raise RuntimeError(
+                f"VPC API {method} {path} failed ({resp.status_code}): {resp.text}"
+            )
+        if resp.content:
+            return resp.json()
+        return {}
 
     @property
     def resource_manager(self):
@@ -1501,6 +1544,117 @@ class CephIbmCloud:
             f"bare metal {action_type} not supported by installed ibm_vpc SDK"
         )
 
+    def _cluster_instance_items(self):
+        existing_by_name = {
+            inst.get("name"): inst
+            for inst in self.instances()
+            if inst.get("name")
+        }
+        items = []
+        for machine, i in self._iter_cluster_nodes():
+            label = self._node_label(machine, i)
+            if label not in existing_by_name:
+                raise RuntimeError(f"missing instance {label}")
+            items.append((machine, i, existing_by_name[label]))
+        return items
+
+    def _get_instance_current(self, inst):
+        iid = inst.get("id")
+        if self._is_bare_metal_instance(inst):
+            return self.client.get_bare_metal_server(iid).get_result()
+        return self.client.get_instance(iid).get_result()
+
+    def _verify_all_stopped(self, instances):
+        not_stopped = []
+        for inst in instances:
+            current = self._get_instance_current(inst)
+            status = current.get("status")
+            if status != "stopped":
+                not_stopped.append((self._instance_name(inst), status))
+        if not_stopped:
+            details = "\n".join(f"  {name}: {status}" for name, status in not_stopped)
+            raise RuntimeError(
+                f"all nodes must be stopped before reinitialize:\n{details}"
+            )
+
+    def _build_instance_reinitialize_prototype(self, machine, label):
+        image = self._get_machine_image(machine)
+        prototype = {
+            "image": {"id": image.get("id")},
+            "keys": [{"id": self.ssh_key.get("id")}],
+            "user_data": "",
+        }
+        root_size = machine.get("root_size")
+        if root_size:
+            capacity_gb = max(1, int(math.ceil(root_size / 1024)))
+            prototype["boot_volume_attachment"] = {
+                "delete_volume_on_instance_delete": True,
+                "volume": {
+                    "name": f"{label}-boot-{int(time.time() * 1000)}",
+                    "capacity": capacity_gb,
+                    "profile": {"name": "general-purpose"},
+                    "user_tags": [],
+                },
+            }
+        return prototype
+
+    def _reinitialize_virtual_instance(self, iid, prototype):
+        if hasattr(self.client, "create_instance_reinitialization"):
+            return self.client.create_instance_reinitialization(
+                iid, prototype
+            ).get_result()
+        return self._vpc_request(
+            "POST",
+            f"/instances/{iid}/reinitialize",
+            json_body=prototype,
+        )
+
+    def _reinitialize_bare_metal_server(self, iid, image_id, key_id):
+        if hasattr(self.client, "replace_bare_metal_server_initialization"):
+            return self.client.replace_bare_metal_server_initialization(
+                iid,
+                {"id": image_id},
+                [{"id": key_id}],
+                user_data="",
+            ).get_result()
+        return self._vpc_request(
+            "PUT",
+            f"/bare_metal_servers/{iid}/initialization",
+            json_body={
+                "image": {"id": image_id},
+                "keys": [{"id": key_id}],
+                "user_data": "",
+            },
+        )
+
+    @busy_retry()
+    def _do_reinitialize_instance(self, machine, inst):
+        iid = inst.get("id")
+        label = self._instance_name(inst)
+        image = self._get_machine_image(machine)
+        image_name = image.get("name") or image.get("id")
+        root_size = machine.get("root_size")
+        is_bare_metal = self._is_bare_metal_instance(inst)
+
+        if is_bare_metal:
+            logging.info(f"{label}: reinitializing bare metal with image {image_name}")
+            self._reinitialize_bare_metal_server(
+                iid, image.get("id"), self.ssh_key.get("id")
+            )
+        else:
+            logging.info(
+                f"{label}: reinitializing with image {image_name}"
+                + (f", root_size={root_size}" if root_size else "")
+            )
+            prototype = self._build_instance_reinitialize_prototype(machine, label)
+            self._reinitialize_virtual_instance(iid, prototype)
+
+        return self._wait_for_instance_status(
+            iid,
+            "running",
+            tries=self.cluster.get("reinitialize_wait_tries", 120),
+        )
+
     def report(self, **kwargs):
         logging.info(f"report {kwargs}")
         self._parse_common_options(**kwargs)
@@ -1652,6 +1806,46 @@ class CephIbmCloud:
         with ThreadPoolExecutor(max_workers=20) as ex:
             list(ex.map(_start_one, nodes))
 
+    def reinitialize(self, **kwargs):
+        logging.info(f"reinitialize {kwargs}")
+        self._parse_common_options(**kwargs)
+
+        items = self._cluster_instance_items()
+        instances = [inst for _machine, _i, inst in items]
+        self._verify_all_stopped(instances)
+
+        print("The following servers will be reinitialized (ALL DATA WILL BE WIPED):")
+        for machine, i, inst in items:
+            image = self._get_machine_image(machine)
+            label = self._node_label(machine, i)
+            image_name = image.get("name") or image.get("id")
+            root_size = machine.get("root_size")
+            kind = "bare metal" if self._is_bare_metal_instance(inst) else "instance"
+            root_info = (
+                f"root_size={root_size}"
+                if root_size and not self._is_bare_metal_instance(inst)
+                else "root_size=n/a"
+            )
+            print(f"  {label} ({kind}): image={image_name} {root_info}")
+
+        reply = input("Type 'yes' to confirm: ")
+        if reply.strip() != "yes":
+            logging.info("aborted")
+            return
+
+        def _reinit_one(item):
+            machine, _i, inst = item
+            return self._do_reinitialize_instance(machine, inst)
+
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            list(ex.map(_reinit_one, items))
+
+        instances = self._gather_cluster_instances()
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            for inst in instances:
+                executor.submit(self._ensure_root_authorized_keys, inst)
+        self._write_inventory(instances)
+
 
 def main(argv):
     parser = argparse.ArgumentParser()
@@ -1674,6 +1868,7 @@ def main(argv):
     subparsers.add_parser("types")
     subparsers.add_parser("down")
     subparsers.add_parser("up")
+    subparsers.add_parser("reinitialize")
 
     images_parser = subparsers.add_parser("images")
     images_parser.add_argument(
