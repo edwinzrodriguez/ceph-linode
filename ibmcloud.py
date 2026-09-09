@@ -539,22 +539,24 @@ class CephIbmCloud:
             return subnet.get("ipv4_cidr_block")
         return self._network_cidr(self._instance_private_ip(instance))
 
-    def _get_machine_type(self, machine):
-        if self._profiles is None:
-            # Consolidate virtual server profiles and bare metal profiles
-            profiles = self.client.list_instance_profiles().get_result().get("profiles", [])
-            try:
-                bm_profiles = (
-                    self.client.list_bare_metal_server_profiles()
-                    .get_result()
-                    .get("profiles", [])
-                )
-                profiles.extend(bm_profiles)
-            except (ApiException, AttributeError) as e:
-                logging.warning(f"Failed to fetch bare metal profiles: {e}")
+    def _load_profiles(self):
+        if self._profiles is not None:
+            return
 
-            self._profiles = profiles
+        profiles = self.client.list_instance_profiles().get_result().get("profiles", [])
+        try:
+            bm_profiles = (
+                self.client.list_bare_metal_server_profiles()
+                .get_result()
+                .get("profiles", [])
+            )
+            profiles.extend(bm_profiles)
+        except (ApiException, AttributeError) as e:
+            logging.warning(f"Failed to fetch bare metal profiles: {e}")
 
+        self._profiles = profiles
+
+    def _get_machine_type_names(self, machine):
         if machine.get("type"):
             t = machine["type"]
         elif self.cluster.get("type"):
@@ -562,13 +564,33 @@ class CephIbmCloud:
         else:
             raise RuntimeError("cluster.json must include type")
 
+        if isinstance(t, list):
+            if not t:
+                raise RuntimeError("cluster.json type list must not be empty")
+            return [str(item) for item in t]
+        return [str(t)]
+
+    def _get_machine_type(self, machine, type_name=None):
+        self._load_profiles()
+
+        if type_name is None:
+            type_name = self._get_machine_type_names(machine)[0]
+
         for profile in self._profiles:
-            if t == profile.get("name"):
+            if type_name == profile.get("name"):
                 return profile
         logging.error(
             f"unknown instance profile, choose among:\n{[p.get('name') for p in self._profiles]}"
         )
-        raise RuntimeError(f"unknown instance profile {machine.get('type')}")
+        raise RuntimeError(f"unknown instance profile {type_name}")
+
+    @staticmethod
+    def _is_capacity_error(exc):
+        message = str(exc)
+        return (
+            "cannot_start_capacity" in message
+            and "Insufficient capacity" in message
+        )
 
     def _get_machine_image(self, machine):
         if machine.get("image"):
@@ -839,41 +861,44 @@ class CephIbmCloud:
                 subnet = self._get_subnet(machine, region=zone)
         else:
             regions = self._get_regions(machine)
+            type_names = self._get_machine_type_names(machine)
+            instance = None
+            subnet = None
             for region in regions:
-                try:
-                    instance = self._do_create_in_region(machine, i, region)
-                    subnet = self._get_subnet(machine, region=region)
-                    break
-                except Exception as e:
-                    # check if e is the specific capacity error
-                    # ApiException might have these details
-                    is_capacity_error = False
-                    if isinstance(e, ApiException):
-                        # The issue description says:
-                        # status is 'failed' with code 'cannot_start_capacity' and message 'Insufficient capacity within the selected zone'
-                        # But ApiException usually happens at creation time if the API rejects it.
-                        # However, sometimes creation succeeds but status becomes 'failed'.
-                        # Let's see how _wait_for_instance_status handles it.
-                        pass
-                    
-                    if "cannot_start_capacity" in str(e) and "Insufficient capacity" in str(e):
-                         is_capacity_error = True
-
-                    if is_capacity_error:
-                        logging.warning(f"{label}: capacity error in {region}, trying next region...")
-                        # If instance was created but failed later, we might need to delete it.
-                        # _do_create_in_region should probably handle deletion if it fails waiting.
-                        if region == regions[-1]:
+                for type_name in type_names:
+                    try:
+                        instance = self._do_create_in_region(
+                            machine, i, region, type_name=type_name
+                        )
+                        subnet = self._get_subnet(machine, region=region)
+                        break
+                    except Exception as e:
+                        if not self._is_capacity_error(e):
                             raise
-                        continue
-                    else:
-                        raise
+
+                        if type_name != type_names[-1]:
+                            logging.warning(
+                                f"{label}: capacity error for {type_name} in {region}, trying next type..."
+                            )
+                        elif region != regions[-1]:
+                            logging.warning(
+                                f"{label}: capacity error in {region} for all types, trying next region..."
+                            )
+                        else:
+                            raise
+                else:
+                    continue
+                break
+            else:
+                raise RuntimeError(
+                    f"{label}: failed to create instance in any region/type combination"
+                )
 
         return self._finalize_instance(machine, instance, subnet=subnet)
 
-    def _do_create_in_region(self, machine, i, region):
+    def _do_create_in_region(self, machine, i, region, type_name=None):
         label = f"{machine['prefix']}-{i:03d}"
-        profile = self._get_machine_type(machine)
+        profile = self._get_machine_type(machine, type_name=type_name)
         image = self._get_machine_image(machine)
         zone = region
         vpc = self._get_vpc(region=region)
@@ -928,8 +953,10 @@ class CephIbmCloud:
         try:
             instance = self._wait_for_instance_status(instance.get("id"), "running")
         except Exception as e:
-            if "cannot_start_capacity" in str(e):
-                logging.warning(f"{label}: failed with capacity error in {zone}. Deleting and retrying...")
+            if self._is_capacity_error(e):
+                logging.warning(
+                    f"{label}: failed with capacity error for {profile.get('name')} in {zone}. Deleting and retrying..."
+                )
                 instance_id = instance.get("id")
                 self._delete_instance(instance_id, is_bare_metal)
                 self._wait_for_instance_deletion(instance_id, is_bare_metal)
