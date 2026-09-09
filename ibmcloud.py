@@ -751,7 +751,7 @@ class CephIbmCloud:
                     )
                     fip_name = self._floating_ip_name(ibmnode)
                     floating_ip = self._get_floating_ip(
-                        ibmnode.get("primary_network_interface", {}).get("id"),
+                        self._get_primary_virtual_network_interface_id(ibmnode),
                         name=fip_name,
                     )
                     public_ip = floating_ip.get("address") if floating_ip else private_ip
@@ -1045,6 +1045,61 @@ class CephIbmCloud:
             time.sleep(delay)
         raise RuntimeError(f"instance {instance_id} did not reach status {status}")
 
+    def _instance_uses_network_attachments(self, instance):
+        if instance.get("primary_network_attachment") or instance.get("network_attachments"):
+            return True
+        href = (instance.get("primary_network_interface") or {}).get("href") or ""
+        return "/network_attachments/" in href
+
+    def _fetch_network_attachment_vni_id(self, instance, network_attachment_id):
+        instance_id = instance.get("id")
+        if not instance_id or not network_attachment_id:
+            return None
+
+        profile_name = (instance.get("profile") or {}).get("name", "").lower()
+        if "metal" in profile_name:
+            attachment = self.client.get_bare_metal_server_network_attachment(
+                instance_id, network_attachment_id
+            ).get_result()
+        else:
+            attachment = self.client.get_instance_network_attachment(
+                instance_id, network_attachment_id
+            ).get_result()
+        return (attachment.get("virtual_network_interface") or {}).get("id")
+
+    def _get_primary_virtual_network_interface_id(self, instance):
+        """
+        Return the virtual network interface ID for floating IP operations.
+
+        Newer IBM VPC instances expose primary_network_interface.id as a network
+        attachment ID for backward compatibility. Floating IPs must target the
+        attached virtual network interface instead.
+        """
+        pna = instance.get("primary_network_attachment") or {}
+        vni_id = (pna.get("virtual_network_interface") or {}).get("id")
+        if vni_id:
+            return vni_id
+
+        primary_ni = instance.get("primary_network_interface") or {}
+        network_attachment_id = primary_ni.get("id")
+        if not network_attachment_id:
+            return None
+
+        for na in instance.get("network_attachments") or []:
+            if na.get("id") == network_attachment_id:
+                vni_id = (na.get("virtual_network_interface") or {}).get("id")
+                if vni_id:
+                    return vni_id
+
+        if self._instance_uses_network_attachments(instance):
+            vni_id = self._fetch_network_attachment_vni_id(
+                instance, network_attachment_id
+            )
+            if vni_id:
+                return vni_id
+
+        return network_attachment_id
+
     def _get_floating_ip(self, target_id, name=None):
         floating_ips = (
             self.client.list_floating_ips().get_result().get("floating_ips", [])
@@ -1059,9 +1114,34 @@ class CephIbmCloud:
     def _floating_ip_name(self, instance):
         return f"{instance.get('name')}-fip"
 
+    def _get_floating_ip_target_zone(self, instance):
+        zone = (instance.get("zone") or {}).get("name")
+        if zone:
+            return zone
+
+        for source in (
+            instance.get("primary_network_attachment"),
+            instance.get("primary_network_interface"),
+        ):
+            if not source:
+                continue
+            zone = ((source.get("subnet") or {}).get("zone") or {}).get("name")
+            if zone:
+                return zone
+
+        vni_id = self._get_primary_virtual_network_interface_id(instance)
+        if vni_id:
+            vni = self.client.get_virtual_network_interface(vni_id).get_result()
+            zone = (vni.get("zone") or {}).get("name")
+            if zone:
+                return zone
+
+        raise RuntimeError(
+            f"{instance.get('name')}: cannot determine zone for floating IP"
+        )
+
     def _ensure_floating_ip(self, instance):
-        primary_ni = instance.get("primary_network_interface", {})
-        target_id = primary_ni.get("id")
+        target_id = self._get_primary_virtual_network_interface_id(instance)
         if not target_id:
             return None
 
@@ -1080,16 +1160,26 @@ class CephIbmCloud:
                 return updated
             return existing
 
-        fip_prototype = {
-            "name": fip_name,
-            "target": {"id": target_id},
-        }
+        if self._instance_uses_network_attachments(instance):
+            zone_name = self._get_floating_ip_target_zone(instance)
+            logging.info(
+                f"{instance.get('name')}: creating floating IP in {zone_name}"
+            )
+            fip = self.client.create_floating_ip(
+                {"name": fip_name, "zone": {"name": zone_name}}
+            ).get_result()
+            self.client.add_network_interface_floating_ip(
+                target_id, fip.get("id")
+            ).get_result()
+            return self.client.get_floating_ip(fip.get("id")).get_result()
+
         logging.info(f"{instance.get('name')}: creating floating IP")
-        return self.client.create_floating_ip(fip_prototype).get_result()
+        return self.client.create_floating_ip(
+            {"name": fip_name, "target": {"id": target_id}}
+        ).get_result()
 
     def _delete_floating_ips(self, instance):
-        primary_ni = instance.get("primary_network_interface", {})
-        target_id = primary_ni.get("id")
+        target_id = self._get_primary_virtual_network_interface_id(instance)
         if not target_id:
             return
 
@@ -1332,7 +1422,7 @@ class CephIbmCloud:
         # Prefer floating IP if present, else fall back to private IP
         private_ip = self._instance_private_ip(inst)
         fip = self._get_floating_ip(
-            target_id=(inst.get("primary_network_interface", {}) or {}).get("id"),
+            target_id=self._get_primary_virtual_network_interface_id(inst),
             name=self._floating_ip_name(inst),
         )
         return (fip.get("address") if fip else None) or private_ip or "-"
