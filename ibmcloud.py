@@ -730,6 +730,25 @@ class CephIbmCloud:
         current = set(instance.get("tags", []) or [])
         return expected.issubset(current)
 
+    def _floating_ip_tags(self):
+        return [self.group, f"{self.group}_fip"]
+
+    def _floating_ip_has_tags(self, fip):
+        expected = set(self._floating_ip_tags())
+        current = set(fip.get("tags", []) or [])
+        return expected.issubset(current)
+
+    def _floating_ip_prototype(self, name, zone_name=None, target_id=None):
+        prototype = {
+            "name": name,
+            "resource_group": {"id": self._get_resource_group_id()},
+        }
+        if zone_name:
+            prototype["zone"] = {"name": zone_name}
+        if target_id:
+            prototype["target"] = {"id": target_id}
+        return prototype
+
     def _finalize_instance(self, machine, instance, subnet=None):
         if subnet is None:
             subnet = self._get_instance_subnet(instance)
@@ -1004,16 +1023,13 @@ class CephIbmCloud:
             time.sleep(delay)
         raise RuntimeError(f"Timeout waiting for instance {instance_id} deletion")
 
-    def _attach_tags(self, instance, tags):
+    def _attach_resource_tags(self, resource, tags):
         if not tags:
             return
 
-        crn = instance.get("crn")
+        crn = resource.get("crn")
         if not crn:
-            instance = self.client.get_instance(instance.get("id")).get_result()
-            crn = instance.get("crn")
-        if not crn:
-            raise RuntimeError("instance CRN not available for tagging")
+            raise RuntimeError("resource CRN not available for tagging")
 
         creds = self.credentials
         account_id = creds.get("ACCOUNT_ID") or creds.get("IBM_ACCOUNT_ID")
@@ -1036,11 +1052,19 @@ class CephIbmCloud:
             refreshed = (
                 self.tagging.list_tags(**list_params).get_result().get("items", [])
             )
-            instance["tags"] = [
+            resource["tags"] = [
                 item.get("name") for item in refreshed if item.get("name")
             ]
         except ApiException:
-            instance["tags"] = list(tags)
+            resource["tags"] = list(tags)
+
+    def _attach_tags(self, instance, tags):
+        if not tags:
+            return
+
+        if not instance.get("crn"):
+            instance = self.client.get_instance(instance.get("id")).get_result()
+        self._attach_resource_tags(instance, tags)
 
     def _wait_for_instance_status(self, instance_id, status, tries=None, delay=None):
         if tries is None:
@@ -1178,6 +1202,11 @@ class CephIbmCloud:
             f"{instance.get('name')}: cannot determine zone for floating IP"
         )
 
+    def _ensure_floating_ip_tags(self, fip):
+        tags = self._floating_ip_tags()
+        if tags and not self._floating_ip_has_tags(fip):
+            self._attach_resource_tags(fip, tags)
+
     def _ensure_floating_ip(self, instance):
         target_id = self._get_primary_virtual_network_interface_id(instance)
         if not target_id:
@@ -1191,11 +1220,11 @@ class CephIbmCloud:
                 logging.info(
                     f"{instance.get('name')}: reattaching floating IP {fip_name}"
                 )
-                updated = self.client.update_floating_ip(
+                existing = self.client.update_floating_ip(
                     existing.get("id"),
                     {"target": {"id": target_id}},
                 ).get_result()
-                return updated
+            self._ensure_floating_ip_tags(existing)
             return existing
 
         if self._instance_uses_network_attachments(instance):
@@ -1204,17 +1233,20 @@ class CephIbmCloud:
                 f"{instance.get('name')}: creating floating IP in {zone_name}"
             )
             fip = self.client.create_floating_ip(
-                {"name": fip_name, "zone": {"name": zone_name}}
+                self._floating_ip_prototype(fip_name, zone_name=zone_name)
             ).get_result()
             self.client.add_network_interface_floating_ip(
                 target_id, fip.get("id")
             ).get_result()
-            return self.client.get_floating_ip(fip.get("id")).get_result()
+            fip = self.client.get_floating_ip(fip.get("id")).get_result()
+        else:
+            logging.info(f"{instance.get('name')}: creating floating IP")
+            fip = self.client.create_floating_ip(
+                self._floating_ip_prototype(fip_name, target_id=target_id)
+            ).get_result()
 
-        logging.info(f"{instance.get('name')}: creating floating IP")
-        return self.client.create_floating_ip(
-            {"name": fip_name, "target": {"id": target_id}}
-        ).get_result()
+        self._ensure_floating_ip_tags(fip)
+        return fip
 
     def _delete_floating_ips(self, instance):
         target_id = self._get_primary_virtual_network_interface_id(instance)
