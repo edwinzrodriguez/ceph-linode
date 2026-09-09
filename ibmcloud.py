@@ -725,6 +725,11 @@ class CephIbmCloud:
                 deduped_tags.append(t)
         return deduped_tags
 
+    def _instance_has_tags(self, machine, instance):
+        expected = set(self._instance_tags(machine))
+        current = set(instance.get("tags", []) or [])
+        return expected.issubset(current)
+
     def _finalize_instance(self, machine, instance, subnet=None):
         if subnet is None:
             subnet = self._get_instance_subnet(instance)
@@ -732,7 +737,8 @@ class CephIbmCloud:
             zone = (instance.get("zone") or {}).get("name")
             subnet = self._get_subnet(machine, region=zone)
         with releasing(self.config_semaphore):
-            self._attach_tags(instance, self._instance_tags(machine))
+            if not self._instance_has_tags(machine, instance):
+                self._attach_tags(instance, self._instance_tags(machine))
             self._ensure_floating_ip(instance)
             instance["_subnet_ipv4_cidr_block"] = subnet.get("ipv4_cidr_block")
         return instance
@@ -949,6 +955,11 @@ class CephIbmCloud:
                 instance = self.client.create_bare_metal_server(instance_prototype).get_result()
             else:
                 instance = self.client.create_instance(instance_prototype).get_result()
+
+        tags = self._instance_tags(machine)
+        if tags:
+            logging.info(f"{label}: attaching tags {tags}")
+            self._attach_tags(instance, tags)
 
         try:
             instance = self._wait_for_instance_status(instance.get("id"), "running")
