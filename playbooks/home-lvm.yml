@@ -1,0 +1,205 @@
+# Copyright (C) 2020 Red Hat, Inc.
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+# PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Create an LVM volume group from spare disks and remount /home onto a new LV.
+#
+# Usage:
+#   do_playbook playbooks/home-lvm.yml --limit 'client2-00*' -e block_devices=vdb,vdc
+#   do_playbook playbooks/home-lvm.yml --limit 'client2-00*' -e '{"block_devices":["vdb","vdc"]}'
+#
+# Variables:
+#   block_devices: disks as a YAML list, comma-separated string, or JSON list string;
+#                  default ["vdb", "vdc"]
+#   vg_name:       volume group name; default "vg_home"
+#   lv_name:       logical volume name; default "lv_home"
+#   lv_size:       LV size; default "500g"
+#   home_fstype:   filesystem type; default "xfs"
+#   mount_path:    mount point; default "/home"
+
+---
+
+- hosts: clients
+  become: yes
+  vars:
+    block_devices:
+      - vdb
+      - vdc
+    vg_name: vg_home
+    lv_name: lv_home
+    lv_size: 500g
+    home_fstype: xfs
+    mount_path: /home
+    home_staging: /mnt/home_staging
+    lv_device: "/dev/{{ vg_name }}/{{ lv_name }}"
+    lv_mapper: "/dev/mapper/{{ vg_name }}-{{ lv_name }}"
+
+  tasks:
+    # -e 'block_devices=["vdb","vdc"]' is key=value form, so Ansible keeps a string.
+    # Accept a real list, a JSON list string, or a comma-separated string.
+    - name: coerce JSON-string block_devices to a list
+      set_fact:
+        block_device_list: "{{ block_devices | from_json }}"
+      when:
+        - block_devices is string
+        - block_devices is match('^\s*\[')
+
+    - name: coerce comma-separated block_devices to a list
+      set_fact:
+        block_device_list: "{{ block_devices.split(',') | map('trim') | reject('equalto', '') | list }}"
+      when:
+        - block_devices is string
+        - block_device_list is not defined
+
+    - name: use list block_devices as-is
+      set_fact:
+        block_device_list: "{{ block_devices }}"
+      when: block_device_list is not defined
+
+    - name: normalize block device paths
+      set_fact:
+        block_device_paths: >-
+          {{
+            block_device_list
+            | map('regex_replace', '^(?!/dev/)', '/dev/')
+            | list
+          }}
+
+    - name: require at least one block device
+      fail:
+        msg: >-
+          block_devices must be a non-empty list.
+          Prefer: -e block_devices=vdb,vdc
+          or: -e '{"block_devices":["vdb","vdc"]}'
+      when: (block_device_paths | length) == 0
+
+    - name: check whether /home is already on the target LV
+      command: findmnt -n -o SOURCE --target {{ mount_path }}
+      register: home_source
+      changed_when: false
+      failed_when: false
+
+    - name: skip host when /home is already the target LV
+      debug:
+        msg: "{{ mount_path }} is already mounted from {{ home_source.stdout }} — nothing to do"
+      when: home_source.stdout in [lv_device, lv_mapper]
+
+    - name: configure home LVM and migrate /home
+      when: home_source.stdout not in [lv_device, lv_mapper]
+      block:
+        - name: install lvm2
+          package:
+            name: lvm2
+            state: present
+
+        - name: assert block devices exist
+          stat:
+            path: "{{ item }}"
+          loop: "{{ block_device_paths }}"
+          register: block_device_stats
+
+        - name: fail if a block device is missing
+          fail:
+            msg: "Block device {{ item.item }} does not exist on {{ inventory_hostname }}"
+          when: not item.stat.exists
+          loop: "{{ block_device_stats.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: assert block devices are not mounted
+          command: findmnt -n -S {{ item }}
+          register: device_mounts
+          changed_when: false
+          failed_when: device_mounts.rc == 0
+          loop: "{{ block_device_paths }}"
+          loop_control:
+            label: "{{ item }}"
+
+        - name: create physical volumes
+          command: pvcreate {{ item }}
+          register: pvcreate_result
+          changed_when: pvcreate_result.rc == 0
+          failed_when:
+            - pvcreate_result.rc != 0
+            - "'already' not in (pvcreate_result.stderr | default(''))"
+          loop: "{{ block_device_paths }}"
+          loop_control:
+            label: "{{ item }}"
+
+        - name: ensure volume group exists
+          lvg:
+            vg: "{{ vg_name }}"
+            pvs: "{{ block_device_paths | join(',') }}"
+            state: present
+
+        - name: ensure logical volume exists
+          lvol:
+            vg: "{{ vg_name }}"
+            lv: "{{ lv_name }}"
+            size: "{{ lv_size }}"
+            state: present
+
+        - name: create filesystem on logical volume
+          filesystem:
+            fstype: "{{ home_fstype }}"
+            dev: "{{ lv_device }}"
+
+        - name: create staging mount point
+          file:
+            path: "{{ home_staging }}"
+            state: directory
+            mode: "0755"
+
+        - name: mount logical volume at staging path (no fstab)
+          command: mount -t {{ home_fstype }} {{ lv_device }} {{ home_staging }}
+          register: staging_mount
+          changed_when: staging_mount.rc == 0
+          failed_when:
+            - staging_mount.rc != 0
+            - "'already mounted' not in (staging_mount.stderr | default(''))"
+
+        - name: copy existing /home contents onto new volume
+          command: rsync -aHAX --delete {{ mount_path }}/ {{ home_staging }}/
+          register: home_rsync
+          changed_when: true
+
+        - name: restore SELinux contexts on staged home
+          command: restorecon -R {{ home_staging }}
+          changed_when: false
+          failed_when: false
+
+        - name: unmount staging path
+          command: umount {{ home_staging }}
+          changed_when: true
+
+        - name: remove staging mount point
+          file:
+            path: "{{ home_staging }}"
+            state: absent
+
+        - name: mount logical volume at /home and persist in fstab
+          mount:
+            path: "{{ mount_path }}"
+            src: "{{ lv_device }}"
+            fstype: "{{ home_fstype }}"
+            opts: defaults
+            state: mounted
+
+        - name: show final /home mount
+          command: findmnt -n {{ mount_path }}
+          register: home_mount_final
+          changed_when: false
+
+        - name: report /home mount
+          debug:
+            msg: "{{ home_mount_final.stdout }}"
